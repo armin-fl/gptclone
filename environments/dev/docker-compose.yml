@@ -1,0 +1,50 @@
+name: gptclone-vllm-dev
+
+services:
+  postgres:
+    image: postgres:gptclone
+    container_name: vllm-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gptclone
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ../../data/vllm-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gptclone"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: pgadmin:gptclone
+    container_name: vllm-pgadmin-dev
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: f.armin8090@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_LISTEN_PORT: 5050
+    ports:
+      - "5050:5050"
+    volumes:
+      - ../../data/vllm-pgadmin:/var/lib/pgadmin
+    depends_on:
+      pgadmin-permissions:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  pgadmin-permissions:
+    image: pgadmin:gptclone
+    container_name: vllm-pgadmin-permissions-dev
+    user: root
+    restart: "no"
+    entrypoint:
+      - sh
+      - -c
+      - chown -R 5050:0 /var/lib/pgadmin && chmod -R u+rwX,g+rwX /var/lib/pgadmin
+    volumes:
+      - ../../data/vllm-pgadmin:/var/lib/pgadmin

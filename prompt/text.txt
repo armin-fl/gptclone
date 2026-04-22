@@ -1,0 +1,20 @@
+ want to build chatgpt clone.
+for now i only want chat with my model via browser, storing chat history and access privous chat via sidebar (exactly like chargpt)
+and sending conversetion in current chat to api as system message to provide entire conversation to model, serving my local model with vLLM OpenAI-compatible API exactly like chat gpt .
+i dont need auth for now.
+create custom user model phone number as user identity.
+also create django admin panel(use django create super user).
+create my end point using DRF
+
+for now only focus on dev stage and dont work on production.
+
+my tech stack is django nextjs postgres and vLLM.
+
+check latest version of nextjs16 app router. 
+also use shadcn.
+check my entire project.
+keep users data in accounts and vLLM api in api app.
+Don't install any app just tell me i will install them my self .
+
+
+  

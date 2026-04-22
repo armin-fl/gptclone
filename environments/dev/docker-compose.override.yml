@@ -1,0 +1,25 @@
+services:
+  vllm-gpt-oss-20b:
+    image: vllm:gptclone
+    container_name: vllm-gpt-oss-20b-dev
+    restart: unless-stopped
+    ipc: host
+    ports:
+      - "8001:8000"
+    volumes:
+      - ../../data/huggingface:/root/.cache/huggingface
+      - ../../models/OpenAI:/models/gpt-oss-20b:ro
+    command:
+      - --model
+      - /models/gpt-oss-20b
+      - --served-model-name
+      - gpt-oss-20b
+      - --dtype
+      - auto
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
