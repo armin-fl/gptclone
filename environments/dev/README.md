@@ -5,6 +5,7 @@ This setup runs only infrastructure services:
 - vLLM OpenAI-compatible API servers
 - PostgreSQL
 - pgAdmin
+- Langfuse observability stack
 
 Django and Next.js run outside Docker.
 
@@ -23,10 +24,22 @@ vLLM model servers:
 
 - `gpt-oss-20b`: `http://127.0.0.1:8001/v1`
 
+Langfuse:
+
+- UI: `http://127.0.0.1:3001`
+- Login: `admin@example.com` / `admin12345`
+- Dev public key: `pk-lf-dev-project-key`
+- Dev secret key: `sk-lf-dev-secret-key`
+
 The vLLM service uses the pinned release image `vllm/vllm-openai:v0.19.1`.
 When Docker shows `vllm-gpt-oss-20b Pulling`, it is pulling the vLLM container
 image layers. The model is loaded from the local bind mount because the command
 uses `--model /models/gpt-oss-20b`, not `--model openai/gpt-oss-20b`.
+
+vLLM exports OpenTelemetry traces to Langfuse at
+`http://langfuse-web:3000/api/public/otel/v1/traces`. The Django backend also
+wraps each OpenAI-compatible chat completion with Langfuse so the trace includes
+the request, response, model, conversation session id, and user id.
 
 The Django backend routes by the OpenAI request `model` field, so more than one
 model server can run at the same time when additional services are added.
@@ -81,6 +94,18 @@ VLLM_MODELS = {
 }
 ```
 
+If you add another vLLM container and want server-side traces, also set:
+
+```yaml
+environment:
+  OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+  OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+  OTEL_SERVICE_NAME: vllm-new-model
+command:
+  - --otlp-traces-endpoint
+  - http://langfuse-web:3000/api/public/otel/v1/traces
+```
+
 Start or recreate only that model container:
 
 ```bash
@@ -96,10 +121,14 @@ This vLLM dev stack keeps separate containers and data folders from earlier loca
 - vLLM API container: `vllm-gpt-oss-20b-dev`
 - PostgreSQL container: `vllm-postgres-dev`
 - pgAdmin container: `vllm-pgadmin-dev`
+- Langfuse UI container: `vllm-langfuse-web-dev`
+- Langfuse worker container: `vllm-langfuse-worker-dev`
 - PostgreSQL data: `data/vllm-postgres`
 - pgAdmin data: `data/vllm-pgadmin`
 
 The PostgreSQL and pgAdmin images are still `postgres:gptclone` and `pgadmin:gptclone`.
+Langfuse uses separate Docker named volumes for its Postgres, ClickHouse, Redis,
+and MinIO data.
 
 ### Stop
 

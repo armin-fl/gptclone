@@ -1,11 +1,13 @@
-import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.conf import settings
 from django.test import SimpleTestCase
 
 from .services import (
     UnsupportedVllmModelError,
+    _build_vllm_client,
     build_history_as_system_message,
     get_available_vllm_models,
     get_vllm_base_url,
@@ -42,43 +44,64 @@ class VllmServiceTests(SimpleTestCase):
         ):
             get_vllm_base_url("unknown-model")
 
-    @patch("api.services.request.urlopen")
+    @patch("api.services.LangfuseOpenAI")
+    def test_build_vllm_client_uses_openai_compatible_base_url(self, mock_openai):
+        _build_vllm_client("gpt-oss-20b")
+
+        mock_openai.assert_called_once_with(
+            api_key=settings.VLLM_API_KEY,
+            base_url="http://127.0.0.1:8001/v1",
+            timeout=120,
+        )
+
+    @patch("api.services.propagate_attributes")
+    @patch("api.services._build_vllm_client")
     def test_request_vllm_chat_routes_gpt_oss_20b_to_its_vllm_server(
         self,
-        mock_urlopen,
+        mock_build_client,
+        mock_propagate_attributes,
     ):
-        mock_urlopen.return_value = _FakeResponse(
-            {"choices": [{"message": {"content": " Hello from vLLM "}}]}
-        )
+        mock_client = mock_build_client.return_value
+        mock_client.chat.completions.create.return_value = _FakeCompletion(" Hello from vLLM ")
+        mock_propagate_attributes.return_value = nullcontext()
 
         content = request_vllm_chat(
             model="gpt-oss-20b",
             messages=[{"role": "user", "content": "Hello"}],
+            langfuse_session_id="conversation-1",
+            langfuse_user_id="user-1",
+            langfuse_metadata={"message_id": 10},
         )
 
         self.assertEqual(content, "Hello from vLLM")
-        req = mock_urlopen.call_args.args[0]
-        timeout = mock_urlopen.call_args.kwargs["timeout"]
-        payload = json.loads(req.data.decode("utf-8"))
-
-        self.assertEqual(req.full_url, "http://127.0.0.1:8001/v1/chat/completions")
-        self.assertEqual(req.get_method(), "POST")
-        self.assertIsNone(req.get_header("Authorization"))
-        self.assertEqual(timeout, 120)
-        self.assertEqual(
-            payload,
-            {
+        mock_build_client.assert_called_once_with("gpt-oss-20b")
+        mock_propagate_attributes.assert_called_once_with(
+            trace_name="vllm-chat-completion",
+            tags=["gptclone", "vllm", "gpt-oss-20b"],
+            metadata={
+                "provider": "vllm",
                 "model": "gpt-oss-20b",
-                "messages": [{"role": "user", "content": "Hello"}],
-                "stream": False,
+                "message_id": "10",
             },
+            session_id="conversation-1",
+            user_id="user-1",
+        )
+        mock_client.chat.completions.create.assert_called_once_with(
+            model="gpt-oss-20b",
+            messages=[{"role": "user", "content": "Hello"}],
+            stream=False,
         )
 
-    @patch("api.services.request.urlopen")
-    def test_request_vllm_chat_rejects_empty_assistant_message(self, mock_urlopen):
-        mock_urlopen.return_value = _FakeResponse(
-            {"choices": [{"message": {"content": " "}}]}
-        )
+    @patch("api.services.propagate_attributes")
+    @patch("api.services._build_vllm_client")
+    def test_request_vllm_chat_rejects_empty_assistant_message(
+        self,
+        mock_build_client,
+        mock_propagate_attributes,
+    ):
+        mock_client = mock_build_client.return_value
+        mock_client.chat.completions.create.return_value = _FakeCompletion(" ")
+        mock_propagate_attributes.return_value = nullcontext()
 
         with self.assertRaisesMessage(
             RuntimeError,
@@ -89,16 +112,20 @@ class VllmServiceTests(SimpleTestCase):
                 messages=[{"role": "user", "content": "Hello"}],
             )
 
+        mock_propagate_attributes.assert_called_once_with(
+            trace_name="vllm-chat-completion",
+            tags=["gptclone", "vllm", "gpt-oss-20b"],
+            metadata={
+                "provider": "vllm",
+                "model": "gpt-oss-20b",
+            },
+        )
 
-class _FakeResponse:
-    def __init__(self, payload):
-        self.payload = payload
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
+class _FakeCompletion:
+    def __init__(self, content):
+        self.choices = [
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+            )
+        ]

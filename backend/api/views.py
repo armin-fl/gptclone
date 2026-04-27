@@ -136,7 +136,16 @@ class ConversationSendMessageView(APIView):
             ]
 
             try:
-                assistant_reply = request_vllm_chat(model=model, messages=llm_messages)
+                assistant_reply = request_vllm_chat(
+                    model=model,
+                    messages=llm_messages,
+                    langfuse_session_id=str(conversation.id),
+                    langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
+                    langfuse_metadata={
+                        "conversation_id": str(conversation.id),
+                        "message_id": user_message.id,
+                    },
+                )
             except UnsupportedVllmModelError as exc:
                 transaction.set_rollback(True)
                 return Response(

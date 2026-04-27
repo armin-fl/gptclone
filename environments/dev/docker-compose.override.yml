@@ -4,11 +4,18 @@ services:
     container_name: vllm-gpt-oss-20b-dev
     restart: unless-stopped
     ipc: host
+    environment:
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+      OTEL_SERVICE_NAME: vllm-gpt-oss-20b
     ports:
       - "8001:8000"
     volumes:
       - ../../data/huggingface:/root/.cache/huggingface
       - ../../models/OpenAI:/models/gpt-oss-20b:ro
+    depends_on:
+      langfuse-web:
+        condition: service_started
     command:
       - --model
       - /models/gpt-oss-20b
@@ -16,6 +23,8 @@ services:
       - gpt-oss-20b
       - --dtype
       - auto
+      - --otlp-traces-endpoint
+      - http://langfuse-web:3000/api/public/otel/v1/traces
     deploy:
       resources:
         reservations:

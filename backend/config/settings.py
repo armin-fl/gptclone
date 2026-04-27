@@ -1,5 +1,7 @@
 """Django settings for local development only."""
 
+import os
+
 SECRET_KEY = "dev-only-secret-key-change-me"
 DEBUG = True
 ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
@@ -84,7 +86,16 @@ REST_FRAMEWORK = {
 }
 
 VLLM_MODEL = "gpt-oss-20b"
+VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "EMPTY")
 VLLM_MODELS = {
     "gpt-oss-20b": "http://127.0.0.1:8001/v1",
 }
 VLLM_TIMEOUT_SECONDS = 120
+
+LANGFUSE_BASE_URL = os.environ.get("LANGFUSE_BASE_URL", "http://127.0.0.1:3001")
+LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "pk-lf-dev-project-key")
+LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "sk-lf-dev-secret-key")
+
+os.environ.setdefault("LANGFUSE_BASE_URL", LANGFUSE_BASE_URL)
+os.environ.setdefault("LANGFUSE_PUBLIC_KEY", LANGFUSE_PUBLIC_KEY)
+os.environ.setdefault("LANGFUSE_SECRET_KEY", LANGFUSE_SECRET_KEY)

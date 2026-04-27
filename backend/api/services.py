@@ -1,7 +1,7 @@
-import json
-from urllib import error, request
-
 from django.conf import settings
+from langfuse import propagate_attributes
+from langfuse.openai import OpenAI as LangfuseOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAIError
 
 
 class UnsupportedVllmModelError(RuntimeError):
@@ -39,35 +39,67 @@ def get_vllm_base_url(model: str) -> str:
         ) from exc
 
 
-def request_vllm_chat(*, model: str, messages: list[dict[str, str]]) -> str:
-    payload = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-        }
-    ).encode("utf-8")
-
-    endpoint = f"{get_vllm_base_url(model).rstrip('/')}/chat/completions"
-    req = request.Request(
-        endpoint,
-        data=payload,
-        method="POST",
-        headers={"Content-Type": "application/json"},
+def _build_vllm_client(model: str) -> LangfuseOpenAI:
+    return LangfuseOpenAI(
+        api_key=settings.VLLM_API_KEY,
+        base_url=get_vllm_base_url(model),
+        timeout=settings.VLLM_TIMEOUT_SECONDS,
     )
 
-    try:
-        with request.urlopen(req, timeout=settings.VLLM_TIMEOUT_SECONDS) as response:
-            parsed = json.loads(response.read().decode("utf-8"))
-    except error.HTTPError as exc:
-        details = exc.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"vLLM HTTP error {exc.code}: {details}") from exc
-    except error.URLError as exc:
-        raise RuntimeError(f"Could not reach vLLM at {endpoint}: {exc.reason}") from exc
 
-    choices = parsed.get("choices") or []
-    first_choice = choices[0] if choices else {}
-    content = ((first_choice.get("message") or {}).get("content") or "").strip()
+def _get_assistant_content(completion) -> str:
+    choices = getattr(completion, "choices", None) or []
+    first_choice = choices[0] if choices else None
+    message = getattr(first_choice, "message", None)
+    content = getattr(message, "content", "") if message else ""
+    return (content or "").strip()
+
+
+def request_vllm_chat(
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    langfuse_session_id: str | None = None,
+    langfuse_user_id: str | None = None,
+    langfuse_metadata: dict | None = None,
+) -> str:
+    endpoint = f"{get_vllm_base_url(model).rstrip('/')}/chat/completions"
+    raw_trace_metadata = {
+        "provider": "vllm",
+        "model": model,
+        **(langfuse_metadata or {}),
+    }
+    trace_metadata = {
+        key: str(value)
+        for key, value in raw_trace_metadata.items()
+        if value is not None
+    }
+    trace_context = {
+        "trace_name": "vllm-chat-completion",
+        "tags": ["gptclone", "vllm", model],
+        "metadata": trace_metadata,
+    }
+    if langfuse_session_id:
+        trace_context["session_id"] = langfuse_session_id
+    if langfuse_user_id:
+        trace_context["user_id"] = langfuse_user_id
+
+    try:
+        with propagate_attributes(**trace_context):
+            completion = _build_vllm_client(model).chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=False,
+            )
+    except APIStatusError as exc:
+        details = getattr(exc.response, "text", "") or str(exc)
+        raise RuntimeError(f"vLLM HTTP error {exc.status_code}: {details}") from exc
+    except (APIConnectionError, APITimeoutError) as exc:
+        raise RuntimeError(f"Could not reach vLLM at {endpoint}: {exc}") from exc
+    except OpenAIError as exc:
+        raise RuntimeError(f"vLLM request failed: {exc}") from exc
+
+    content = _get_assistant_content(completion)
     if not content:
         raise RuntimeError("vLLM returned an empty assistant message.")
 
