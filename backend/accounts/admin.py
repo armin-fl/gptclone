@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.utils.translation import gettext_lazy as _
 
-from .models import User
+from .models import PhoneOTP, User
 
 
 @admin.register(User)
@@ -38,3 +38,11 @@ class CustomUserAdmin(UserAdmin):
             },
         ),
     )
+
+
+@admin.register(PhoneOTP)
+class PhoneOTPAdmin(admin.ModelAdmin):
+    list_display = ("id", "phone_number", "is_used", "attempts", "expires_at", "created_at")
+    search_fields = ("phone_number",)
+    list_filter = ("is_used", "created_at", "expires_at")
+    readonly_fields = ("phone_number", "code_hash", "attempts", "is_used", "created_at", "expires_at", "verified_at")

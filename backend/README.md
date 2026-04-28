@@ -20,6 +20,12 @@ This backend is set up for **development only**.
   - Langfuse UI -> `http://127.0.0.1:3001`
   - Default dev project keys are initialized by Docker Compose.
 - Full conversation history is sent to vLLM as a **system message** before the latest user message.
+- Phone + OTP authentication with SimpleJWT symmetric HS256 access/refresh tokens:
+  - `POST /api/auth/request-otp/`
+  - `POST /api/auth/verify-otp/`
+  - `POST /api/auth/refresh/`
+  - `GET /api/auth/me/`
+- Conversation endpoints require `Authorization: Bearer <access_token>` and only return the authenticated user's data.
 
 ### Install dependencies (run yourself)
 
@@ -43,6 +49,11 @@ VLLM_TIMEOUT_SECONDS = 120
 LANGFUSE_BASE_URL = "http://127.0.0.1:3001"
 LANGFUSE_PUBLIC_KEY = "pk-lf-dev-project-key"
 LANGFUSE_SECRET_KEY = "sk-lf-dev-secret-key"
+JWT_SECRET_KEY = "<env override, otherwise derived from SECRET_KEY for dev>"
+JWT_ACCESS_TOKEN_SECONDS = 900
+JWT_REFRESH_TOKEN_SECONDS = 604800
+OTP_CODE_TTL_SECONDS = 300
+OTP_MAX_ATTEMPTS = 5
 ```
 
 The Langfuse SDK reads those values from environment variables if set, otherwise

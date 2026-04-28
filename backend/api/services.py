@@ -8,6 +8,7 @@ class UnsupportedVllmModelError(RuntimeError):
     pass
 
 
+# Flow 4: called by ConversationSendMessageView.post() to turn previous Message rows into vLLM context.
 def build_history_as_system_message(conversation_messages) -> str:
     lines = []
     for msg in conversation_messages:
@@ -25,10 +26,12 @@ def build_history_as_system_message(conversation_messages) -> str:
     )
 
 
+# Flow 2: called by the view to reject unknown requested models before contacting vLLM.
 def get_available_vllm_models() -> list[str]:
     return list(settings.VLLM_MODELS.keys())
 
 
+# Flow 5a: used by request_vllm_chat() and _build_vllm_client() to find the model's vLLM URL.
 def get_vllm_base_url(model: str) -> str:
     try:
         return settings.VLLM_MODELS[model]
@@ -39,6 +42,7 @@ def get_vllm_base_url(model: str) -> str:
         ) from exc
 
 
+# Flow 5b: called by request_vllm_chat() to build the Langfuse/OpenAI client for that URL.
 def _build_vllm_client(model: str) -> LangfuseOpenAI:
     return LangfuseOpenAI(
         api_key=settings.VLLM_API_KEY,
@@ -47,6 +51,7 @@ def _build_vllm_client(model: str) -> LangfuseOpenAI:
     )
 
 
+# Flow 6: called by request_vllm_chat() to extract text that the view saves and returns.
 def _get_assistant_content(completion) -> str:
     choices = getattr(completion, "choices", None) or []
     first_choice = choices[0] if choices else None
@@ -55,6 +60,7 @@ def _get_assistant_content(completion) -> str:
     return (content or "").strip()
 
 
+# Flow 5: called by the view with prepared messages; traces, calls vLLM, then returns assistant text.
 def request_vllm_chat(
     *,
     model: str,

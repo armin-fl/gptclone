@@ -1,4 +1,3 @@
-from accounts.models import User
 from rest_framework import serializers
 
 from .models import Conversation, Message
@@ -51,22 +50,14 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
 
 class ConversationCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255, required=False, allow_blank=True)
-    phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
 
     def create(self, validated_data):
         title = validated_data.get("title") or Conversation.DEFAULT_TITLE
-        phone_number = (validated_data.get("phone_number") or "").strip()
-
-        user = None
-        if phone_number:
-            user, _ = User.objects.get_or_create(phone_number=phone_number)
-
-        return Conversation.objects.create(title=title, user=user)
+        return Conversation.objects.create(title=title, user=self.context["request"].user)
 
 
 class SendMessageSerializer(serializers.Serializer):
     content = serializers.CharField()
-    phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
     model = serializers.CharField(max_length=100, required=False, allow_blank=True)
     system_instruction = serializers.CharField(required=False, allow_blank=True)
 

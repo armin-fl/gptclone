@@ -3,7 +3,7 @@ from django.db import transaction
 from django.db.models import Prefetch
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -22,6 +22,7 @@ from .services import (
 )
 
 
+# Flow 7: used by ConversationSendMessageView.post() after saving the assistant reply to title a new chat.
 def _build_title_from_user_message(content: str) -> str:
     title = " ".join(content.split())
     if len(title) > 60:
@@ -30,21 +31,22 @@ def _build_title_from_user_message(content: str) -> str:
 
 
 class ConversationListCreateView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
+    # List flow: GET /conversations/ returns conversations and previews; separate from the send-message path.
     def get(self, request):
-        phone_number = (request.query_params.get("phone_number") or "").strip()
-        qs = Conversation.objects.select_related("user").prefetch_related(
-            Prefetch("messages", queryset=Message.objects.only("content", "created_at"))
+        qs = (
+            Conversation.objects.filter(user=request.user)
+            .select_related("user")
+            .prefetch_related(Prefetch("messages", queryset=Message.objects.only("content", "created_at")))
         )
-        if phone_number:
-            qs = qs.filter(user__phone_number=phone_number)
 
         serializer = ConversationListSerializer(qs, many=True)
         return Response(serializer.data)
 
+    # Create flow: POST /conversations/ creates the conversation_id used by ConversationSendMessageView.post().
     def post(self, request):
-        serializer = ConversationCreateSerializer(data=request.data)
+        serializer = ConversationCreateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         conversation = serializer.save()
         output = ConversationDetailSerializer(conversation)
@@ -52,32 +54,27 @@ class ConversationListCreateView(APIView):
 
 
 class ConversationDetailView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
+    # Detail flow: GET /conversations/<id>/ returns messages, same shape as the send-message response.
     def get(self, request, conversation_id):
         conversation = (
             Conversation.objects.select_related("user")
             .prefetch_related("messages")
-            .filter(id=conversation_id)
+            .filter(id=conversation_id, user=request.user)
             .first()
         )
         if not conversation:
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        phone_number = (request.query_params.get("phone_number") or "").strip()
-        if phone_number and conversation.user and conversation.user.phone_number != phone_number:
-            return Response(
-                {"detail": "Conversation not found for this phone number."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
 
         serializer = ConversationDetailSerializer(conversation)
         return Response(serializer.data)
 
 
 class ConversationSendMessageView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
+    # Flow 1: request entry; validates input, calls services, saves messages, and returns the conversation.
     def post(self, request, conversation_id):
         serializer = SendMessageSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -85,21 +82,15 @@ class ConversationSendMessageView(APIView):
         conversation = (
             Conversation.objects.select_related("user")
             .prefetch_related("messages")
-            .filter(id=conversation_id)
+            .filter(id=conversation_id, user=request.user)
             .first()
         )
         if not conversation:
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        phone_number = (serializer.validated_data.get("phone_number") or "").strip()
-        if phone_number and conversation.user and conversation.user.phone_number != phone_number:
-            return Response(
-                {"detail": "Conversation not found for this phone number."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
         content = serializer.validated_data["content"]
         model = serializer.validated_data.get("model") or settings.VLLM_MODEL
+        # Flow 2: check the requested model through get_available_vllm_models() before saving or calling vLLM.
         if model not in get_available_vllm_models():
             return Response(
                 {
@@ -115,6 +106,7 @@ class ConversationSendMessageView(APIView):
         )
 
         with transaction.atomic():
+            # Flow 3: store the USER message first so later history and response include this request.
             user_message = Message.objects.create(
                 conversation=conversation,
                 role=Message.Role.USER,
@@ -122,6 +114,7 @@ class ConversationSendMessageView(APIView):
             )
 
             previous_messages = conversation.messages.exclude(id=user_message.id)
+            # Flow 4: build_history_as_system_message() turns older messages into vLLM context.
             history_system_message = build_history_as_system_message(previous_messages)
 
             llm_messages = [
@@ -136,6 +129,7 @@ class ConversationSendMessageView(APIView):
             ]
 
             try:
+                # Flow 5: request_vllm_chat() sends the prepared messages to vLLM and returns assistant text.
                 assistant_reply = request_vllm_chat(
                     model=model,
                     messages=llm_messages,
@@ -165,6 +159,7 @@ class ConversationSendMessageView(APIView):
                     status=status.HTTP_502_BAD_GATEWAY,
                 )
 
+            # Flow 6: save the ASSISTANT message so the database matches what the user receives.
             Message.objects.create(
                 conversation=conversation,
                 role=Message.Role.ASSISTANT,
@@ -176,6 +171,7 @@ class ConversationSendMessageView(APIView):
             conversation.updated_at = timezone.now()
             conversation.save(update_fields=["title", "updated_at"])
 
+        # Flow 8: reload and serialize the full conversation as the HTTP response back to the client.
         refreshed = Conversation.objects.select_related("user").prefetch_related("messages").get(id=conversation.id)
         response_data = ConversationDetailSerializer(refreshed).data
         response_data["active_model"] = model

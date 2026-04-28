@@ -37,3 +37,28 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self) -> str:
         return self.phone_number
+
+
+class PhoneOTP(models.Model):
+    """One-time code for phone-number sign in."""
+
+    phone_number = models.CharField(
+        max_length=20,
+        db_index=True,
+        validators=[phone_validator],
+    )
+    code_hash = models.CharField(max_length=255)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["phone_number", "is_used", "-created_at"], name="phone_otp_lookup_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"OTP for {self.phone_number}"

@@ -21,6 +21,32 @@ export interface ConversationDetail extends Conversation {
   active_model?: string;
 }
 
+export interface AuthUser {
+  id: number;
+  phone_number: string;
+  first_name: string;
+  last_name: string;
+}
+
+export interface OTPRequestResponse {
+  detail: string;
+  otp_code?: string;
+}
+
+export interface AuthTokenResponse {
+  access: string;
+  refresh: string;
+  token_type: "Bearer";
+  access_expires_at: string;
+  refresh_expires_at: string;
+  user: AuthUser;
+}
+
+export interface TokenRefreshResponse {
+  access: string;
+  refresh?: string;
+}
+
 export interface ApiError {
   detail?: string;
   error?: string;

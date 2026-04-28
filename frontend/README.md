@@ -5,7 +5,7 @@ This frontend provides a ChatGPT-style development UI:
 - Sidebar with previous conversations.
 - New chat flow.
 - Message history per conversation.
-- Phone-number-based identity input (no auth yet).
+- Phone-number OTP sign-in with JWT-backed chat requests.
 - Message composer that calls Django DRF endpoints.
 
 ### Version check

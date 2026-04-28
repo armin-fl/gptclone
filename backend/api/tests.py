@@ -3,8 +3,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.conf import settings
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
+from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
 
+from accounts.models import User
+from api.models import Conversation
 from .services import (
     UnsupportedVllmModelError,
     _build_vllm_client,
@@ -129,3 +133,42 @@ class _FakeCompletion:
                 message=SimpleNamespace(content=content),
             )
         ]
+
+
+class ConversationAuthorizationTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(phone_number="+15550000001")
+        self.other_user = User.objects.create_user(phone_number="+15550000002")
+
+    def authenticate(self, user):
+        access_token = RefreshToken.for_user(user).access_token
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access_token}")
+
+    def test_conversation_endpoints_require_authentication(self):
+        response = self.client.get("/api/conversations/")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_conversations_are_scoped_to_authenticated_user(self):
+        self.authenticate(self.user)
+        create_response = self.client.post("/api/conversations/", {}, format="json")
+
+        self.assertEqual(create_response.status_code, 201)
+        conversation_id = create_response.data["id"]
+        conversation = Conversation.objects.get(id=conversation_id)
+        self.assertEqual(conversation.user, self.user)
+
+        self.authenticate(self.other_user)
+        list_response = self.client.get("/api/conversations/")
+        detail_response = self.client.get(f"/api/conversations/{conversation_id}/")
+        send_response = self.client.post(
+            f"/api/conversations/{conversation_id}/messages/",
+            {"content": "Hello"},
+            format="json",
+        )
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.data, [])
+        self.assertEqual(detail_response.status_code, 404)
+        self.assertEqual(send_response.status_code, 404)
