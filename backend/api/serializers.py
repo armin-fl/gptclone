@@ -19,6 +19,7 @@ class ConversationListSerializer(serializers.ModelSerializer):
             "id",
             "title",
             "user_phone_number",
+            "is_pinned",
             "created_at",
             "updated_at",
             "last_message_preview",
@@ -42,6 +43,7 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
             "id",
             "title",
             "user_phone_number",
+            "is_pinned",
             "created_at",
             "updated_at",
             "messages",
@@ -54,6 +56,22 @@ class ConversationCreateSerializer(serializers.Serializer):
     def create(self, validated_data):
         title = validated_data.get("title") or Conversation.DEFAULT_TITLE
         return Conversation.objects.create(title=title, user=self.context["request"].user)
+
+
+class ConversationUpdateSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255, required=False, allow_blank=False)
+    is_pinned = serializers.BooleanField(required=False)
+
+    def validate_title(self, value: str) -> str:
+        clean = " ".join(value.split())
+        if not clean:
+            raise serializers.ValidationError("Title cannot be empty.")
+        return clean
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError("Provide title or is_pinned.")
+        return attrs
 
 
 class SendMessageSerializer(serializers.Serializer):

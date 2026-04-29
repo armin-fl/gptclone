@@ -15,17 +15,43 @@ export class HttpError extends Error {
   public payload: ApiError | null;
 
   constructor(status: number, payload: ApiError | null) {
-    super(payload?.detail || payload?.error || `Request failed with status ${status}`);
+    super(formatApiError(status, payload));
     this.status = status;
     this.payload = payload;
   }
 }
 
+function formatApiError(status: number, payload: ApiError | null): string {
+  if (!payload) {
+    return `Request failed with status ${status}`;
+  }
+
+  if (payload.detail || payload.error) {
+    return String(payload.detail || payload.error);
+  }
+
+  const firstFieldError = Object.entries(payload).find(([, value]) => {
+    if (Array.isArray(value)) {
+      return value.length > 0;
+    }
+    return typeof value === "string";
+  });
+
+  if (firstFieldError) {
+    const [field, value] = firstFieldError;
+    const message = Array.isArray(value) ? value[0] : value;
+    return `${field}: ${message}`;
+  }
+
+  return `Request failed with status ${status}`;
+}
+
 async function request<T>(path: string, init?: RequestInit, accessToken?: string): Promise<T> {
+  const isFormData = init?.body instanceof FormData;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...(init?.headers ?? {}),
     },
@@ -42,17 +68,21 @@ async function request<T>(path: string, init?: RequestInit, accessToken?: string
     throw new HttpError(response.status, payload);
   }
 
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
   return (await response.json()) as T;
 }
 
-export function requestOtp(phoneNumber: string) {
+export function requestOtp(phoneNumber: string, authMode: "login" | "register") {
   return request<OTPRequestResponse>("/api/auth/request-otp/", {
     method: "POST",
-    body: JSON.stringify({ phone_number: phoneNumber }),
+    body: JSON.stringify({ phone_number: phoneNumber, auth_mode: authMode }),
   });
 }
 
-export function verifyOtp(payload: { phone_number: string; otp: string }) {
+export function verifyOtp(payload: { phone_number: string; otp: string; auth_mode: "login" | "register" }) {
   return request<AuthTokenResponse>("/api/auth/verify-otp/", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -70,12 +100,53 @@ export function getMe(accessToken: string) {
   return request<AuthUser>("/api/auth/me/", undefined, accessToken);
 }
 
+export function updateMe(accessToken: string, payload: FormData) {
+  return request<AuthUser>("/api/auth/me/", {
+    method: "PATCH",
+    body: payload,
+  }, accessToken);
+}
+
+export function requestPhoneChangeOtp(accessToken: string, phoneNumber: string) {
+  return request<OTPRequestResponse>("/api/auth/change-phone/request-otp/", {
+    method: "POST",
+    body: JSON.stringify({ phone_number: phoneNumber }),
+  }, accessToken);
+}
+
+export function verifyPhoneChangeOtp(
+  accessToken: string,
+  payload: { phone_number: string; otp: string },
+) {
+  return request<AuthUser>("/api/auth/change-phone/verify-otp/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }, accessToken);
+}
+
 export function listConversations(accessToken: string) {
   return request<Conversation[]>("/api/conversations/", undefined, accessToken);
 }
 
 export function getConversation(conversationId: string, accessToken: string) {
   return request<ConversationDetail>(`/api/conversations/${conversationId}/`, undefined, accessToken);
+}
+
+export function updateConversation(
+  conversationId: string,
+  accessToken: string,
+  payload: { title?: string; is_pinned?: boolean },
+) {
+  return request<ConversationDetail>(`/api/conversations/${conversationId}/`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  }, accessToken);
+}
+
+export function deleteConversation(conversationId: string, accessToken: string) {
+  return request<void>(`/api/conversations/${conversationId}/`, {
+    method: "DELETE",
+  }, accessToken);
 }
 
 export function createConversation(accessToken: string, payload: { title?: string } = {}) {

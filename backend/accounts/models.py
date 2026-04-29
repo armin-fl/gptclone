@@ -1,15 +1,9 @@
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
-from django.core.validators import RegexValidator
 from django.db import models
 from django.utils import timezone
 
 from .managers import UserManager
-
-
-phone_validator = RegexValidator(
-    regex=r"^\+?[0-9]{8,15}$",
-    message="Phone number must be 8-15 digits and can start with +.",
-)
+from .phone_numbers import phone_validator
 
 
 class User(AbstractBaseUser, PermissionsMixin):
@@ -23,6 +17,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     )
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
+    profile_image = models.FileField(upload_to="profile-images/", blank=True, null=True)
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     date_joined = models.DateTimeField(default=timezone.now)
@@ -42,10 +37,21 @@ class User(AbstractBaseUser, PermissionsMixin):
 class PhoneOTP(models.Model):
     """One-time code for phone-number sign in."""
 
+    class Purpose(models.TextChoices):
+        LOGIN = "login", "Login"
+        REGISTER = "register", "Register"
+        CHANGE_PHONE = "change_phone", "Change phone"
+
     phone_number = models.CharField(
         max_length=20,
         db_index=True,
         validators=[phone_validator],
+    )
+    purpose = models.CharField(
+        max_length=20,
+        choices=Purpose.choices,
+        default=Purpose.LOGIN,
+        db_index=True,
     )
     code_hash = models.CharField(max_length=255)
     attempts = models.PositiveSmallIntegerField(default=0)
@@ -57,7 +63,10 @@ class PhoneOTP(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=["phone_number", "is_used", "-created_at"], name="phone_otp_lookup_idx"),
+            models.Index(
+                fields=["phone_number", "purpose", "is_used", "-created_at"],
+                name="phone_otp_purpose_idx",
+            ),
         ]
 
     def __str__(self) -> str:

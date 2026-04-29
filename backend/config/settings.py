@@ -3,6 +3,8 @@
 import os
 from datetime import timedelta
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 SECRET_KEY = "dev-only-secret-key-change-me"
 DEBUG = True
 ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
@@ -77,6 +79,8 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CORS_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]

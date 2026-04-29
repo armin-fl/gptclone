@@ -1,5 +1,7 @@
 from django.contrib.auth.base_user import BaseUserManager
 
+from .phone_numbers import normalize_phone_number
+
 
 class UserManager(BaseUserManager):
     """Custom manager with phone number as the unique login identifier."""
@@ -10,7 +12,7 @@ class UserManager(BaseUserManager):
         if not phone_number:
             raise ValueError("The phone number must be set.")
 
-        normalized_phone = str(phone_number).strip()
+        normalized_phone = normalize_phone_number(phone_number)
         user = self.model(phone_number=normalized_phone, **extra_fields)
         if password:
             user.set_password(password)

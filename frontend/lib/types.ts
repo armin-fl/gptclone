@@ -11,6 +11,7 @@ export interface Conversation {
   id: string;
   title: string;
   user_phone_number?: string;
+  is_pinned: boolean;
   created_at: string;
   updated_at: string;
   last_message_preview?: string;
@@ -26,6 +27,7 @@ export interface AuthUser {
   phone_number: string;
   first_name: string;
   last_name: string;
+  profile_image_url: string;
 }
 
 export interface OTPRequestResponse {
@@ -50,4 +52,5 @@ export interface TokenRefreshResponse {
 export interface ApiError {
   detail?: string;
   error?: string;
+  [key: string]: unknown;
 }

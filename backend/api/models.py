@@ -16,11 +16,12 @@ class Conversation(models.Model):
         related_name="conversations",
     )
     title = models.CharField(max_length=255, default=DEFAULT_TITLE)
+    is_pinned = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["-updated_at"]
+        ordering = ["-is_pinned", "-updated_at"]
 
     def __str__(self) -> str:
         user_label = self.user.phone_number if self.user else "anonymous"

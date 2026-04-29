@@ -138,8 +138,8 @@ class _FakeCompletion:
 class ConversationAuthorizationTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.user = User.objects.create_user(phone_number="+15550000001")
-        self.other_user = User.objects.create_user(phone_number="+15550000002")
+        self.user = User.objects.create_user(phone_number="09100000001")
+        self.other_user = User.objects.create_user(phone_number="09100000002")
 
     def authenticate(self, user):
         access_token = RefreshToken.for_user(user).access_token
@@ -172,3 +172,42 @@ class ConversationAuthorizationTests(TestCase):
         self.assertEqual(list_response.data, [])
         self.assertEqual(detail_response.status_code, 404)
         self.assertEqual(send_response.status_code, 404)
+
+    def test_conversation_can_be_renamed_pinned_and_deleted_by_owner(self):
+        self.authenticate(self.user)
+        create_response = self.client.post("/api/conversations/", {"title": "Original"}, format="json")
+        conversation_id = create_response.data["id"]
+
+        update_response = self.client.patch(
+            f"/api/conversations/{conversation_id}/",
+            {"title": "Renamed chat", "is_pinned": True},
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(update_response.data["title"], "Renamed chat")
+        self.assertTrue(update_response.data["is_pinned"])
+        conversation = Conversation.objects.get(id=conversation_id)
+        self.assertEqual(conversation.title, "Renamed chat")
+        self.assertTrue(conversation.is_pinned)
+
+        delete_response = self.client.delete(f"/api/conversations/{conversation_id}/")
+
+        self.assertEqual(delete_response.status_code, 204)
+        self.assertFalse(Conversation.objects.filter(id=conversation_id).exists())
+
+    def test_other_user_cannot_rename_or_delete_conversation(self):
+        conversation = Conversation.objects.create(user=self.user, title="Private")
+        self.authenticate(self.other_user)
+
+        update_response = self.client.patch(
+            f"/api/conversations/{conversation.id}/",
+            {"title": "Stolen"},
+            format="json",
+        )
+        delete_response = self.client.delete(f"/api/conversations/{conversation.id}/")
+
+        self.assertEqual(update_response.status_code, 404)
+        self.assertEqual(delete_response.status_code, 404)
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.title, "Private")

@@ -12,6 +12,7 @@ from .serializers import (
     ConversationCreateSerializer,
     ConversationDetailSerializer,
     ConversationListSerializer,
+    ConversationUpdateSerializer,
     SendMessageSerializer,
 )
 from .services import (
@@ -56,19 +57,50 @@ class ConversationListCreateView(APIView):
 class ConversationDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def _get_conversation(self, request, conversation_id, *, include_messages: bool = True):
+        qs = Conversation.objects.select_related("user").filter(id=conversation_id, user=request.user)
+        if include_messages:
+            qs = qs.prefetch_related("messages")
+        return qs.first()
+
     # Detail flow: GET /conversations/<id>/ returns messages, same shape as the send-message response.
     def get(self, request, conversation_id):
-        conversation = (
-            Conversation.objects.select_related("user")
-            .prefetch_related("messages")
-            .filter(id=conversation_id, user=request.user)
-            .first()
-        )
+        conversation = self._get_conversation(request, conversation_id)
         if not conversation:
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = ConversationDetailSerializer(conversation)
         return Response(serializer.data)
+
+    def patch(self, request, conversation_id):
+        conversation = self._get_conversation(request, conversation_id, include_messages=False)
+        if not conversation:
+            return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ConversationUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        update_fields = []
+        if "title" in serializer.validated_data:
+            conversation.title = serializer.validated_data["title"]
+            update_fields.append("title")
+        if "is_pinned" in serializer.validated_data:
+            conversation.is_pinned = serializer.validated_data["is_pinned"]
+            update_fields.append("is_pinned")
+
+        conversation.updated_at = timezone.now()
+        update_fields.append("updated_at")
+        conversation.save(update_fields=update_fields)
+
+        return Response(ConversationDetailSerializer(conversation).data)
+
+    def delete(self, request, conversation_id):
+        conversation = self._get_conversation(request, conversation_id, include_messages=False)
+        if not conversation:
+            return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        conversation.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ConversationSendMessageView(APIView):

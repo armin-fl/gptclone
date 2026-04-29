@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowUp,
   Bot,
+  Camera,
   Check,
   ChevronDown,
   LogOut,
@@ -12,30 +14,43 @@ import {
   Moon,
   MoreHorizontal,
   PanelLeftClose,
-  Paperclip,
+  Pencil,
+  Pin,
+  PinOff,
+  Plus,
+  Palette,
+  Phone,
   Search,
-  Send,
   Settings,
   Sparkles,
   SquarePen,
   Sun,
+  Trash2,
+  UserRound,
   X,
 } from "lucide-react";
 
 import {
   createConversation,
+  deleteConversation,
   getConversation,
+  getMe,
   HttpError,
   listConversations,
   refreshAuthToken,
+  requestPhoneChangeOtp,
   requestOtp,
   sendMessage,
+  updateConversation,
+  updateMe,
+  verifyPhoneChangeOtp,
   verifyOtp,
 } from "@/lib/api";
-import type { Conversation, ConversationDetail } from "@/lib/types";
+import type { AuthUser, Conversation, ConversationDetail } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
@@ -43,11 +58,17 @@ const PHONE_STORAGE_KEY = "chat_phone_number";
 const ACCESS_TOKEN_STORAGE_KEY = "chat_access_token";
 const REFRESH_TOKEN_STORAGE_KEY = "chat_refresh_token";
 const THEME_STORAGE_KEY = "chat_theme";
+const SYSTEM_INSTRUCTION_STORAGE_KEY = "chat_system_instruction";
+const PHONE_PREFIX = "09";
+const PHONE_REST_LENGTH = 9;
+const PHONE_LENGTH = PHONE_PREFIX.length + PHONE_REST_LENGTH;
+const PHONE_NUMBER_PATTERN = /^09[0-9]{9}$/;
 const DEFAULT_SYSTEM_INSTRUCTION =
   "You are a helpful AI assistant. Use concise and actionable answers unless the user asks for detail.";
 
 type Theme = "dark" | "light";
 type AuthMode = "login" | "register";
+type AccountTab = "profile" | "personalization";
 
 interface AuthSession {
   access: string;
@@ -75,6 +96,83 @@ const MODEL_OPTIONS = [
   },
 ];
 
+const DIGIT_RANGE_STARTS = [
+  0x0660,
+  0x06f0,
+  0x0966,
+  0x09e6,
+  0x0a66,
+  0x0ae6,
+  0x0b66,
+  0x0be6,
+  0x0c66,
+  0x0ce6,
+  0x0d66,
+  0x0e50,
+  0x0ed0,
+  0x0f20,
+  0x1040,
+  0x17e0,
+  0xff10,
+];
+
+function toEnglishDigits(value: string): string {
+  return Array.from(value, (char) => {
+    const code = char.codePointAt(0);
+    if (code === undefined) {
+      return char;
+    }
+
+    for (const start of DIGIT_RANGE_STARTS) {
+      if (code >= start && code <= start + 9) {
+        return String(code - start);
+      }
+    }
+
+    return char;
+  }).join("");
+}
+
+function getDigits(value: string): string {
+  return toEnglishDigits(value).replace(/\D/g, "");
+}
+
+function normalizePhoneDraft(value: string): string {
+  const digits = getDigits(value);
+
+  if (!digits) {
+    return PHONE_PREFIX;
+  }
+
+  if (digits.startsWith(PHONE_PREFIX)) {
+    return digits.slice(0, PHONE_LENGTH);
+  }
+
+  if (digits.startsWith("9") && digits.length >= 10) {
+    return `0${digits.slice(0, PHONE_LENGTH - 1)}`;
+  }
+
+  return `${PHONE_PREFIX}${digits.slice(0, PHONE_REST_LENGTH)}`;
+}
+
+function getStoredPhoneNumber(value: string | null): string {
+  if (!value) {
+    return "";
+  }
+
+  const normalized = normalizePhoneDraft(value);
+  return PHONE_NUMBER_PATTERN.test(normalized) ? normalized : "";
+}
+
+function getSubmitPhoneNumber(value: string): string | null {
+  const normalized = normalizePhoneDraft(value);
+  return PHONE_NUMBER_PATTERN.test(normalized) ? normalized : null;
+}
+
+function normalizeOtpDraft(value: string): string {
+  return getDigits(value).slice(0, 6);
+}
+
 function isToday(value: string): boolean {
   const date = new Date(value);
   const now = new Date();
@@ -97,7 +195,18 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function getInitials(phoneNumber: string): string {
+function getDisplayName(user: AuthUser | null, fallbackPhoneNumber: string): string {
+  const fullName = [user?.first_name, user?.last_name].filter(Boolean).join(" ").trim();
+  return fullName || user?.phone_number || fallbackPhoneNumber || "Guest profile";
+}
+
+function getInitials(phoneNumber: string, user?: AuthUser | null): string {
+  const fullName = [user?.first_name, user?.last_name].filter(Boolean).join(" ").trim();
+  if (fullName) {
+    const parts = fullName.split(/\s+/).slice(0, 2);
+    return parts.map((part) => part[0]).join("").toUpperCase();
+  }
+
   const digits = phoneNumber.replace(/\D/g, "");
   if (digits.length >= 2) {
     return digits.slice(-2);
@@ -111,45 +220,33 @@ function groupConversations(conversations: Conversation[], query: string) {
     const haystack = `${conversation.title} ${conversation.last_message_preview ?? ""}`.toLowerCase();
     return !cleanQuery || haystack.includes(cleanQuery);
   });
+  const unpinned = filtered.filter((conversation) => !conversation.is_pinned);
 
   return {
-    today: filtered.filter((conversation) => isToday(conversation.updated_at)),
-    lastWeek: filtered.filter((conversation) => {
+    pinned: filtered.filter((conversation) => conversation.is_pinned),
+    today: unpinned.filter((conversation) => isToday(conversation.updated_at)),
+    lastWeek: unpinned.filter((conversation) => {
       const age = daysAgo(conversation.updated_at);
       return age > 0 && age <= 30;
     }),
-    olderThan30: filtered.filter((conversation) => daysAgo(conversation.updated_at) > 30),
+    olderThan30: unpinned.filter((conversation) => daysAgo(conversation.updated_at) > 30),
   };
 }
 
 export function ChatApp() {
-  const [phoneNumber, setPhoneNumber] = useState(() => {
-    if (typeof window === "undefined") {
-      return "";
-    }
-    return window.localStorage.getItem(PHONE_STORAGE_KEY) ?? "";
-  });
-  const [phoneInput, setPhoneInput] = useState(phoneNumber);
-  const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
-    if (typeof window === "undefined") {
-      return null;
-    }
-    const access = window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    const refresh = window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
-    return access && refresh ? { access, refresh } : null;
-  });
-  const [theme, setTheme] = useState<Theme>(() => {
-    if (typeof window === "undefined") {
-      return "dark";
-    }
-    return (window.localStorage.getItem(THEME_STORAGE_KEY) as Theme | null) ?? "dark";
-  });
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [phoneInput, setPhoneInput] = useState(PHONE_PREFIX);
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+  const [theme, setTheme] = useState<Theme>("dark");
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [otpInput, setOtpInput] = useState("");
   const [devOtp, setDevOtp] = useState("");
   const [isOtpRequested, setIsOtpRequested] = useState(false);
+  const [isPhoneInputFocused, setIsPhoneInputFocused] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<ConversationDetail | null>(null);
+  const [isComposingNewChat, setIsComposingNewChat] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [draft, setDraft] = useState("");
   const [systemInstruction, setSystemInstruction] = useState(DEFAULT_SYSTEM_INSTRUCTION);
@@ -160,14 +257,48 @@ export function ChatApp() {
   const [error, setError] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null);
+  const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSidebarProfileMenuOpen, setIsSidebarProfileMenuOpen] = useState(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [accountTab, setAccountTab] = useState<AccountTab>("profile");
+  const [profileFirstName, setProfileFirstName] = useState("");
+  const [profileLastName, setProfileLastName] = useState("");
+  const [profileImageFile, setProfileImageFile] = useState<File | null>(null);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [changePhoneInput, setChangePhoneInput] = useState(PHONE_PREFIX);
+  const [changePhoneOtpInput, setChangePhoneOtpInput] = useState("");
+  const [changePhoneDevOtp, setChangePhoneDevOtp] = useState("");
+  const [isPhoneChangeOtpRequested, setIsPhoneChangeOtpRequested] = useState(false);
+  const [isRequestingPhoneOtp, setIsRequestingPhoneOtp] = useState(false);
+  const [isVerifyingPhoneOtp, setIsVerifyingPhoneOtp] = useState(false);
+  const [phoneChangeMessage, setPhoneChangeMessage] = useState<string | null>(null);
+  const [phoneChangeError, setPhoneChangeError] = useState<string | null>(null);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+  const draftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const isDark = theme === "dark";
   const activeConversationId = activeConversation?.id;
   const accessToken = authSession?.access ?? "";
   const activeModel = MODEL_OPTIONS.find((model) => model.id === selectedModel) ?? MODEL_OPTIONS[0];
+  const profileDisplayName = getDisplayName(currentUser, phoneNumber);
+  const profileImageUrl = currentUser?.profile_image_url || "";
+  const phoneRestInput = phoneInput.startsWith(PHONE_PREFIX) ? phoneInput.slice(PHONE_PREFIX.length) : "";
+  const changePhoneClean = getSubmitPhoneNumber(changePhoneInput);
+  const isChangePhoneValid = Boolean(changePhoneClean);
+  const isChangePhoneSame =
+    Boolean(changePhoneClean) && changePhoneClean === (currentUser?.phone_number || phoneNumber);
+  const phoneDigitSlots = Array.from(
+    { length: PHONE_REST_LENGTH },
+    (_, index) => phoneRestInput[index] ?? "",
+  );
+  const isPhoneNumberValid = PHONE_NUMBER_PATTERN.test(phoneInput);
+  const isOtpValid = otpInput.length === 6;
   const groupedConversations = useMemo(
     () => groupConversations(conversations, searchQuery),
     [conversations, searchQuery],
@@ -181,11 +312,67 @@ export function ChatApp() {
 
   const clearAuthSession = useCallback(() => {
     setAuthSession(null);
+    setCurrentUser(null);
     setConversations([]);
     setActiveConversation(null);
+    setIsComposingNewChat(false);
     setDraft("");
     window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
     window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+  }, []);
+
+  const applyConversationUpdate = useCallback((updated: ConversationDetail) => {
+    setConversations((prev) =>
+      prev.map((conversation) =>
+        conversation.id === updated.id
+          ? {
+              ...conversation,
+              title: updated.title,
+              is_pinned: updated.is_pinned,
+              updated_at: updated.updated_at,
+            }
+          : conversation,
+      ),
+    );
+    setActiveConversation((prev) =>
+      prev?.id === updated.id
+        ? {
+            ...prev,
+            title: updated.title,
+            is_pinned: updated.is_pinned,
+            updated_at: updated.updated_at,
+          }
+        : prev,
+    );
+  }, []);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      const storedPhoneNumber = getStoredPhoneNumber(window.localStorage.getItem(PHONE_STORAGE_KEY));
+      const access = window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+      const refresh = window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
+      const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+      const storedSystemInstruction = window.localStorage.getItem(SYSTEM_INSTRUCTION_STORAGE_KEY);
+
+      if (storedPhoneNumber) {
+        setPhoneNumber(storedPhoneNumber);
+        setPhoneInput(storedPhoneNumber);
+      }
+
+      if (access && refresh) {
+        setAuthSession({ access, refresh });
+      }
+
+      if (storedTheme === "dark" || storedTheme === "light") {
+        setTheme(storedTheme);
+      }
+
+      if (storedSystemInstruction !== null) {
+        setSystemInstruction(storedSystemInstruction);
+      }
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, []);
 
   const performAuthenticated = useCallback(
@@ -219,8 +406,72 @@ export function ChatApp() {
   );
 
   useEffect(() => {
+    if (!authSession) {
+      return;
+    }
+
+    let isCancelled = false;
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        const user = await performAuthenticated((access) => getMe(access));
+        if (isCancelled) {
+          return;
+        }
+
+        setCurrentUser(user);
+        setPhoneNumber(user.phone_number);
+        setPhoneInput(user.phone_number);
+        setChangePhoneInput(user.phone_number);
+        setProfileFirstName(user.first_name);
+        setProfileLastName(user.last_name);
+        window.localStorage.setItem(PHONE_STORAGE_KEY, user.phone_number);
+      } catch (err) {
+        if (!isCancelled) {
+          setError(err instanceof Error ? err.message : "Failed to load profile.");
+        }
+      }
+    }, 0);
+
+    return () => {
+      isCancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [authSession, performAuthenticated]);
+
+  useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [activeConversation?.messages]);
+
+  useEffect(() => {
+    if (!isModelMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!modelMenuRef.current?.contains(event.target as Node)) {
+        setIsModelMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [isModelMenuOpen]);
+
+  useEffect(() => {
+    if (!openConversationMenuId) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest("[data-conversation-menu]")) {
+        setOpenConversationMenuId(null);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [openConversationMenuId]);
 
   useEffect(() => {
     if (!authSession) {
@@ -240,6 +491,12 @@ export function ChatApp() {
         setConversations(items);
 
         if (!items.length) {
+          setActiveConversation(null);
+          setIsComposingNewChat(true);
+          return;
+        }
+
+        if (isComposingNewChat) {
           setActiveConversation(null);
           return;
         }
@@ -265,7 +522,7 @@ export function ChatApp() {
       isCancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [authSession, activeConversationId, performAuthenticated]);
+  }, [authSession, activeConversationId, isComposingNewChat, performAuthenticated]);
 
   function toggleTheme() {
     const nextTheme = isDark ? "light" : "dark";
@@ -273,21 +530,184 @@ export function ChatApp() {
     window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
   }
 
-  async function handleCreateConversation() {
+  function closeProfileMenus() {
+    setIsProfileMenuOpen(false);
+    setIsSidebarProfileMenuOpen(false);
+  }
+
+  function openAccountModal(tab: AccountTab) {
+    if (tab === "profile") {
+      setProfileFirstName(currentUser?.first_name ?? "");
+      setProfileLastName(currentUser?.last_name ?? "");
+      setProfileImageFile(null);
+      setProfileMessage(null);
+      setProfileError(null);
+      setPhoneChangeMessage(null);
+      setPhoneChangeError(null);
+      setChangePhoneInput(currentUser?.phone_number || phoneNumber || PHONE_PREFIX);
+      setChangePhoneOtpInput("");
+      setChangePhoneDevOtp("");
+      setIsPhoneChangeOtpRequested(false);
+    }
+
+    setAccountTab(tab);
+    setIsAccountModalOpen(true);
+    closeProfileMenus();
+  }
+
+  function handleSystemInstructionChange(value: string) {
+    setSystemInstruction(value);
+    window.localStorage.setItem(SYSTEM_INSTRUCTION_STORAGE_KEY, value);
+  }
+
+  function renderAvatar(className: string) {
+    if (profileImageUrl) {
+      return (
+        <span
+          className={cn("block shrink-0 rounded-full bg-cover bg-center", className)}
+          style={{ backgroundImage: `url("${profileImageUrl}")` }}
+          aria-hidden="true"
+        />
+      );
+    }
+
+    return (
+      <span
+        className={cn(
+          "grid shrink-0 place-items-center rounded-full bg-[#0d8bd9] text-xs font-semibold text-white",
+          className,
+        )}
+      >
+        {getInitials(phoneNumber, currentUser)}
+      </span>
+    );
+  }
+
+  async function handleSaveProfile(event: React.FormEvent) {
+    event.preventDefault();
+    if (!accessToken || isSavingProfile) {
+      return;
+    }
+
+    const payload = new FormData();
+    payload.append("first_name", profileFirstName.trim());
+    payload.append("last_name", profileLastName.trim());
+    if (profileImageFile) {
+      payload.append("profile_image", profileImageFile);
+    }
+
+    setIsSavingProfile(true);
+    setProfileError(null);
+    setProfileMessage(null);
+
+    try {
+      const user = await performAuthenticated((access) => updateMe(access, payload));
+      setCurrentUser(user);
+      setPhoneNumber(user.phone_number);
+      setProfileFirstName(user.first_name);
+      setProfileLastName(user.last_name);
+      window.localStorage.setItem(PHONE_STORAGE_KEY, user.phone_number);
+      setProfileImageFile(null);
+      setProfileMessage("Profile saved.");
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : "Failed to save profile.");
+    } finally {
+      setIsSavingProfile(false);
+    }
+  }
+
+  async function handleRequestPhoneChangeOtp(event: React.FormEvent) {
+    event.preventDefault();
+    const clean = getSubmitPhoneNumber(changePhoneInput);
+    if (!accessToken || isRequestingPhoneOtp) {
+      return;
+    }
+
+    if (!clean) {
+      setPhoneChangeError("Phone number must be 11 English digits and start with 09.");
+      return;
+    }
+
+    if (clean === (currentUser?.phone_number || phoneNumber)) {
+      setPhoneChangeError("Enter a new phone number.");
+      return;
+    }
+
+    setIsRequestingPhoneOtp(true);
+    setPhoneChangeError(null);
+    setPhoneChangeMessage(null);
+    setChangePhoneDevOtp("");
+    setChangePhoneOtpInput("");
+
+    try {
+      const result = await performAuthenticated((access) => requestPhoneChangeOtp(access, clean));
+      setChangePhoneInput(clean);
+      setChangePhoneDevOtp(result.otp_code ?? "");
+      setChangePhoneOtpInput(result.otp_code ? normalizeOtpDraft(result.otp_code) : "");
+      setIsPhoneChangeOtpRequested(true);
+      setPhoneChangeMessage("OTP sent.");
+    } catch (err) {
+      setPhoneChangeError(err instanceof Error ? err.message : "Failed to send OTP.");
+    } finally {
+      setIsRequestingPhoneOtp(false);
+    }
+  }
+
+  async function handleVerifyPhoneChangeOtp(event: React.FormEvent) {
+    event.preventDefault();
+    const clean = getSubmitPhoneNumber(changePhoneInput);
+    const code = normalizeOtpDraft(changePhoneOtpInput);
+    if (!accessToken || isVerifyingPhoneOtp) {
+      return;
+    }
+
+    if (!clean) {
+      setPhoneChangeError("Phone number must be 11 English digits and start with 09.");
+      return;
+    }
+
+    if (code.length !== 6) {
+      setPhoneChangeError("OTP must be a 6-digit code.");
+      return;
+    }
+
+    setIsVerifyingPhoneOtp(true);
+    setPhoneChangeError(null);
+    setPhoneChangeMessage(null);
+
+    try {
+      const user = await performAuthenticated((access) =>
+        verifyPhoneChangeOtp(access, { phone_number: clean, otp: code }),
+      );
+      setCurrentUser(user);
+      setPhoneNumber(user.phone_number);
+      setPhoneInput(user.phone_number);
+      setChangePhoneInput(user.phone_number);
+      setChangePhoneOtpInput("");
+      setChangePhoneDevOtp("");
+      setIsPhoneChangeOtpRequested(false);
+      window.localStorage.setItem(PHONE_STORAGE_KEY, user.phone_number);
+      setPhoneChangeMessage("Phone number changed.");
+    } catch (err) {
+      setPhoneChangeError(err instanceof Error ? err.message : "Failed to verify OTP.");
+    } finally {
+      setIsVerifyingPhoneOtp(false);
+    }
+  }
+
+  function handleCreateConversation() {
     if (!authSession) {
       setError("Sign in first.");
       return;
     }
 
     setError(null);
-    try {
-      const created = await performAuthenticated((access) => createConversation(access));
-      setActiveConversation(created);
-      setConversations((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
-      setIsSidebarOpen(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create conversation.");
-    }
+    setDraft("");
+    setActiveConversation(null);
+    setIsComposingNewChat(true);
+    setOpenConversationMenuId(null);
+    setRenamingConversationId(null);
+    setRenameDraft("");
   }
 
   async function handleSelectConversation(conversationId: string) {
@@ -300,9 +720,83 @@ export function ChatApp() {
     try {
       const detail = await performAuthenticated((access) => getConversation(conversationId, access));
       setActiveConversation(detail);
-      setIsSidebarOpen(false);
+      setIsComposingNewChat(false);
+      setOpenConversationMenuId(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to open conversation.");
+    }
+  }
+
+  function startRenameConversation(conversation: Conversation) {
+    setRenamingConversationId(conversation.id);
+    setRenameDraft(conversation.title);
+    setOpenConversationMenuId(null);
+  }
+
+  function cancelRenameConversation() {
+    setRenamingConversationId(null);
+    setRenameDraft("");
+  }
+
+  async function handleRenameConversation(event: React.FormEvent, conversationId: string) {
+    event.preventDefault();
+    const title = renameDraft.trim();
+    if (!authSession || !title) {
+      return;
+    }
+
+    setError(null);
+    try {
+      const updated = await performAuthenticated((access) =>
+        updateConversation(conversationId, access, { title }),
+      );
+      applyConversationUpdate(updated);
+      cancelRenameConversation();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to rename chat.");
+    }
+  }
+
+  async function handleTogglePinConversation(conversation: Conversation) {
+    if (!authSession) {
+      setError("Sign in first.");
+      return;
+    }
+
+    setOpenConversationMenuId(null);
+    setError(null);
+    try {
+      const updated = await performAuthenticated((access) =>
+        updateConversation(conversation.id, access, { is_pinned: !conversation.is_pinned }),
+      );
+      applyConversationUpdate(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update pinned chat.");
+    }
+  }
+
+  async function handleDeleteConversation(conversation: Conversation) {
+    if (!authSession) {
+      setError("Sign in first.");
+      return;
+    }
+
+    const shouldDelete = window.confirm(`Delete "${conversation.title}"?`);
+    if (!shouldDelete) {
+      return;
+    }
+
+    setOpenConversationMenuId(null);
+    setError(null);
+    try {
+      await performAuthenticated((access) => deleteConversation(conversation.id, access));
+      setConversations((prev) => prev.filter((item) => item.id !== conversation.id));
+      setActiveConversation((prev) => (prev?.id === conversation.id ? null : prev));
+      if (renamingConversationId === conversation.id) {
+        cancelRenameConversation();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete chat.");
     }
   }
 
@@ -336,6 +830,7 @@ export function ChatApp() {
       );
 
       setDraft("");
+      setIsComposingNewChat(false);
       setActiveConversation(updated);
       setConversations((prev) => {
         const rest = prev.filter((item) => item.id !== updated.id);
@@ -350,8 +845,13 @@ export function ChatApp() {
 
   async function handleRequestOtp(event: React.FormEvent) {
     event.preventDefault();
-    const clean = phoneInput.trim();
-    if (!clean || isAuthenticating) {
+    const clean = getSubmitPhoneNumber(phoneInput);
+    if (isAuthenticating) {
+      return;
+    }
+
+    if (!clean) {
+      setError("Phone number must be 11 English digits and start with 09.");
       return;
     }
 
@@ -359,13 +859,11 @@ export function ChatApp() {
     setError(null);
 
     try {
-      const result = await requestOtp(clean);
-      setPhoneNumber(clean);
+      const result = await requestOtp(clean, authMode);
       setPhoneInput(clean);
       setIsOtpRequested(true);
       setDevOtp(result.otp_code ?? "");
-      setOtpInput(result.otp_code ?? "");
-      window.localStorage.setItem(PHONE_STORAGE_KEY, clean);
+      setOtpInput(result.otp_code ? normalizeOtpDraft(result.otp_code) : "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send OTP.");
     } finally {
@@ -375,9 +873,19 @@ export function ChatApp() {
 
   async function handleVerifyOtp(event: React.FormEvent) {
     event.preventDefault();
-    const clean = phoneInput.trim();
-    const code = otpInput.trim();
-    if (!clean || !code || isAuthenticating) {
+    const clean = getSubmitPhoneNumber(phoneInput);
+    const code = normalizeOtpDraft(otpInput);
+    if (isAuthenticating) {
+      return;
+    }
+
+    if (!clean) {
+      setError("Phone number must be 11 English digits and start with 09.");
+      return;
+    }
+
+    if (code.length !== 6) {
+      setError("OTP must be a 6-digit code.");
       return;
     }
 
@@ -385,13 +893,19 @@ export function ChatApp() {
     setError(null);
 
     try {
-      const session = await verifyOtp({ phone_number: clean, otp: code });
+      const session = await verifyOtp({ phone_number: clean, otp: code, auth_mode: authMode });
       persistAuthSession({
         access: session.access,
         refresh: session.refresh,
       });
+      setCurrentUser(session.user);
       setPhoneNumber(session.user.phone_number);
       setPhoneInput(session.user.phone_number);
+      setChangePhoneInput(session.user.phone_number);
+      setProfileFirstName(session.user.first_name);
+      setProfileLastName(session.user.last_name);
+      setActiveConversation(null);
+      setIsComposingNewChat(true);
       setOtpInput("");
       setDevOtp("");
       setIsOtpRequested(false);
@@ -405,8 +919,26 @@ export function ChatApp() {
 
   function handleSignOut() {
     clearAuthSession();
-    setIsProfileMenuOpen(false);
+    closeProfileMenus();
+    setIsAccountModalOpen(false);
   }
+
+  function resizeDraftTextarea() {
+    const textarea = draftTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    const maxHeight = 176;
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  }
+
+  useEffect(() => {
+    resizeDraftTextarea();
+  }, [draft]);
 
   function renderConversationGroup(title: string, items: Conversation[]) {
     if (!items.length) {
@@ -424,41 +956,568 @@ export function ChatApp() {
           {title}
         </h3>
         {items.map((conversation) => (
-          <button
-            key={conversation.id}
-            onClick={() => void handleSelectConversation(conversation.id)}
-            className={cn(
-              "group flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-sm transition",
-              activeConversationId === conversation.id
-                ? isDark
-                  ? "bg-[#303030] text-[#ececec]"
-                  : "bg-[#ececec] text-[#171717]"
-                : isDark
-                  ? "text-[#ececec] hover:bg-[#2a2a2a]"
-                  : "text-[#171717] hover:bg-[#ececec]",
+          <div key={conversation.id} className="group relative" data-conversation-menu>
+            {renamingConversationId === conversation.id ? (
+              <form
+                onSubmit={(event) => void handleRenameConversation(event, conversation.id)}
+                className={cn(
+                  "flex h-9 w-full items-center gap-2 rounded-lg px-2",
+                  isDark ? "bg-[#303030]" : "bg-[#ececec]",
+                )}
+              >
+                <MessageSquare className="h-4 w-4 shrink-0 opacity-70" />
+                <input
+                  value={renameDraft}
+                  onChange={(event) => setRenameDraft(event.target.value)}
+                  autoFocus
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      cancelRenameConversation();
+                    }
+                  }}
+                  className={cn(
+                    "min-w-0 flex-1 bg-transparent text-sm outline-none",
+                    isDark ? "text-[#ececec]" : "text-[#171717]",
+                  )}
+                />
+                <button
+                  type="button"
+                  onClick={cancelRenameConversation}
+                  className="grid h-6 w-6 shrink-0 place-items-center rounded-md opacity-70 transition hover:opacity-100"
+                  aria-label="Cancel rename"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </form>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void handleSelectConversation(conversation.id)}
+                className={cn(
+                  "group flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-sm transition",
+                  activeConversationId === conversation.id
+                    ? isDark
+                      ? "bg-[#303030] text-[#ececec]"
+                      : "bg-[#ececec] text-[#171717]"
+                    : isDark
+                      ? "text-[#ececec] hover:bg-[#2a2a2a]"
+                      : "text-[#171717] hover:bg-[#ececec]",
+                )}
+              >
+                {conversation.is_pinned ? (
+                  <Pin className="h-4 w-4 shrink-0 opacity-70" />
+                ) : (
+                  <MessageSquare className="h-4 w-4 shrink-0 opacity-70" />
+                )}
+                <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
+              </button>
             )}
-          >
-            <MessageSquare className="h-4 w-4 shrink-0 opacity-70" />
-            <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
-            <MoreHorizontal className="h-4 w-4 shrink-0 opacity-0 transition group-hover:opacity-70" />
-          </button>
+
+            {renamingConversationId !== conversation.id ? (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setOpenConversationMenuId((value) =>
+                    value === conversation.id ? null : conversation.id,
+                  );
+                }}
+                className={cn(
+                  "absolute right-1 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-md transition",
+                  openConversationMenuId === conversation.id
+                    ? isDark
+                      ? "bg-[#3a3a3a] opacity-100"
+                      : "bg-[#dedede] opacity-100"
+                    : "opacity-0 group-hover:opacity-100",
+                  isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#dedede]",
+                )}
+                aria-label="Open chat menu"
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </button>
+            ) : null}
+
+            {openConversationMenuId === conversation.id ? (
+              <div
+                className={cn(
+                  "absolute right-1 top-9 z-50 w-44 rounded-lg border p-1 shadow-xl",
+                  isDark
+                    ? "border-[#3a3a3a] bg-[#2f2f2f] text-[#ececec]"
+                    : "border-[#dedede] bg-white text-[#171717]",
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={() => startRenameConversation(conversation)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition",
+                    isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+                  )}
+                >
+                  <Pencil className="h-4 w-4" />
+                  <span>Rename</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleTogglePinConversation(conversation)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition",
+                    isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+                  )}
+                >
+                  {conversation.is_pinned ? <PinOff className="h-4 w-4" /> : <Pin className="h-4 w-4" />}
+                  <span>{conversation.is_pinned ? "Unpin chat" : "Pin chat"}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteConversation(conversation)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-[#ef4444] transition",
+                    isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#fef2f2]",
+                  )}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  <span>Delete</span>
+                </button>
+              </div>
+            ) : null}
+          </div>
         ))}
       </section>
     );
   }
 
+  function renderProfileMenu() {
+    return (
+      <>
+        <div className="flex items-center gap-3 px-3 py-3">
+          {renderAvatar("h-10 w-10")}
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{profileDisplayName}</p>
+            <p className={cn("truncate text-xs", isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]")}>
+              {currentUser?.phone_number || phoneNumber || "Not signed in"}
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => openAccountModal("profile")}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
+            isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+          )}
+        >
+          <UserRound className="h-4 w-4" />
+          <span>Profile</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => openAccountModal("personalization")}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
+            isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+          )}
+        >
+          <Palette className="h-4 w-4" />
+          <span>Personalization</span>
+        </button>
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
+            isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+          )}
+        >
+          {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          <span>{isDark ? "Light mode" : "Night mode"}</span>
+        </button>
+        {accessToken ? (
+          <button
+            type="button"
+            onClick={handleSignOut}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
+              isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+            )}
+          >
+            <LogOut className="h-4 w-4" />
+            <span>Log out</span>
+          </button>
+        ) : null}
+      </>
+    );
+  }
+
+  function renderAccountModal() {
+    if (!isAccountModalOpen) {
+      return null;
+    }
+
+    const modalIsDark = isDark;
+    const modalFieldClass = cn(
+      "h-10 w-full rounded-lg border px-3 text-sm outline-none transition",
+      modalIsDark
+        ? "!border-[#4a4a4a] !bg-[#303030] !text-[#f4f4f4] !placeholder:text-[#a8a8a8] focus:!border-[#6f6f6f]"
+        : "!border-[#d4d4d4] !bg-[#f7f7f7] !text-[#171717] !placeholder:text-[#777777] focus:!border-[#9a9a9a]",
+    );
+    const modalTextareaClass = cn(
+      "min-h-32 w-full resize-y rounded-lg border px-3 py-2 text-sm leading-6 outline-none transition",
+      modalIsDark
+        ? "!border-[#4a4a4a] !bg-[#303030] !text-[#f4f4f4] !placeholder:text-[#a8a8a8] focus:!border-[#6f6f6f]"
+        : "!border-[#d4d4d4] !bg-[#f7f7f7] !text-[#171717] !placeholder:text-[#777777] focus:!border-[#9a9a9a]",
+    );
+    const mutedTextClass = modalIsDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]";
+    const dividerClass = modalIsDark ? "border-[#3a3a3a]" : "border-[#dddddd]";
+    const navItemClass = (tab: AccountTab) =>
+      cn(
+        "flex h-9 w-full items-center gap-3 rounded-lg px-3 text-sm transition",
+        accountTab === tab
+          ? modalIsDark
+            ? "bg-[#3a3a3a] text-[#f4f4f4]"
+            : "bg-[#e9e9e9] text-[#171717]"
+          : modalIsDark
+            ? "text-[#f4f4f4] hover:bg-[#303030]"
+            : "text-[#303030] hover:bg-[#eeeeee]",
+      );
+
+    return (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center px-4 py-6">
+        <button
+          type="button"
+          className="absolute inset-0 bg-black/70 backdrop-blur-[1px]"
+          aria-label="Close account settings"
+          onClick={() => setIsAccountModalOpen(false)}
+        />
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Account settings"
+          className={cn(
+            "relative grid h-[min(600px,92vh)] w-full max-w-[680px] grid-cols-[196px_minmax(0,1fr)] overflow-hidden rounded-2xl border text-[14px] shadow-2xl",
+            modalIsDark
+              ? "border-[#2f2f2f] bg-[#212121] text-[#f4f4f4]"
+              : "border-[#d9d9d9] bg-white text-[#171717]",
+          )}
+        >
+          <aside
+            className={cn(
+              "flex min-h-0 flex-col border-r px-2 py-4",
+              modalIsDark ? "border-[#363636] bg-[#212121]" : "border-[#e5e5e5] bg-[#f7f7f7]",
+            )}
+          >
+            <button
+              type="button"
+              onClick={() => setIsAccountModalOpen(false)}
+              className={cn(
+                "mb-6 grid h-9 w-9 place-items-center rounded-lg transition",
+                modalIsDark ? "hover:bg-[#303030]" : "hover:bg-[#e9e9e9]",
+              )}
+              aria-label="Close"
+            >
+              <X className="h-5 w-5" />
+            </button>
+
+            <nav className="space-y-1">
+              <button type="button" onClick={() => setAccountTab("profile")} className={navItemClass("profile")}>
+                <UserRound className="h-4 w-4" />
+                <span>Profile</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAccountTab("personalization")}
+                className={navItemClass("personalization")}
+              >
+                <Palette className="h-4 w-4" />
+                <span>Personalization</span>
+              </button>
+              <button
+                type="button"
+                disabled
+                className={cn(
+                  "flex h-9 w-full items-center gap-3 rounded-lg px-3 text-sm opacity-60",
+                  modalIsDark ? "text-[#f4f4f4]" : "text-[#303030]",
+                )}
+              >
+                <Settings className="h-4 w-4" />
+                <span>General</span>
+              </button>
+            </nav>
+          </aside>
+
+          <section className={cn("min-h-0 overflow-y-auto px-6 py-5", modalIsDark ? "bg-[#212121]" : "bg-white")}>
+            <div className={cn("mb-5 border-b pb-4", dividerClass)}>
+              <h2 className="text-lg font-medium leading-7">
+                {accountTab === "profile" ? "Profile" : "Personalization"}
+              </h2>
+            </div>
+
+            {accountTab === "profile" ? (
+              <div className="space-y-6">
+                {!accessToken ? (
+                  <div className={cn("rounded-lg border px-4 py-3 text-sm", dividerClass, mutedTextClass)}>
+                    Sign in to edit your profile.
+                  </div>
+                ) : (
+                  <>
+                    <form onSubmit={handleSaveProfile} className="space-y-5">
+                      <div className="flex items-center gap-4">
+                        {renderAvatar("h-16 w-16")}
+                        <div className="min-w-0">
+                          <label
+                            htmlFor="profile-image-input"
+                            className={cn(
+                              "inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg px-3 text-sm font-medium transition",
+                              modalIsDark ? "bg-[#303030] hover:bg-[#3a3a3a]" : "bg-[#ececec] hover:bg-[#e1e1e1]",
+                            )}
+                          >
+                            <Camera className="h-4 w-4" />
+                            <span>Upload image</span>
+                          </label>
+                          <input
+                            id="profile-image-input"
+                            type="file"
+                            accept="image/*"
+                            className="sr-only"
+                            onChange={(event) => setProfileImageFile(event.target.files?.[0] ?? null)}
+                          />
+                          {profileImageFile ? (
+                            <p className={cn("mt-2 truncate text-xs", mutedTextClass)}>
+                              {profileImageFile.name}
+                            </p>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <label className="space-y-2 text-sm">
+                          <span className="font-medium">Name</span>
+                          <input
+                            value={profileFirstName}
+                            onChange={(event) => setProfileFirstName(event.target.value)}
+                            maxLength={150}
+                            autoComplete="given-name"
+                            className={modalFieldClass}
+                          />
+                        </label>
+                        <label className="space-y-2 text-sm">
+                          <span className="font-medium">Family name</span>
+                          <input
+                            value={profileLastName}
+                            onChange={(event) => setProfileLastName(event.target.value)}
+                            maxLength={150}
+                            autoComplete="family-name"
+                            className={modalFieldClass}
+                          />
+                        </label>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Button
+                          type="submit"
+                          disabled={isSavingProfile}
+                          className="h-9 rounded-full bg-[#10a37f] px-5 text-white hover:bg-[#0d8f6f]"
+                        >
+                          {isSavingProfile ? "Saving..." : "Save profile"}
+                        </Button>
+                        {profileMessage ? <span className="text-sm text-[#10a37f]">{profileMessage}</span> : null}
+                        {profileError ? <span className="text-sm text-[#ef4444]">{profileError}</span> : null}
+                      </div>
+                    </form>
+
+                    <div className={cn("border-t pt-5", dividerClass)}>
+                      <div className="mb-3 flex items-center gap-2">
+                        <Phone className="h-4 w-4 opacity-75" />
+                        <h3 className="text-base font-medium">Phone number</h3>
+                      </div>
+                      <p className={cn("mb-3 text-sm", mutedTextClass)}>
+                        Current: {currentUser?.phone_number || phoneNumber}
+                      </p>
+                      <form onSubmit={handleRequestPhoneChangeOtp} className="flex flex-col gap-3 sm:flex-row">
+                        <input
+                          value={changePhoneInput}
+                          onChange={(event) => {
+                            setChangePhoneInput(normalizePhoneDraft(event.target.value));
+                            setIsPhoneChangeOtpRequested(false);
+                            setChangePhoneOtpInput("");
+                            setChangePhoneDevOtp("");
+                            setPhoneChangeError(null);
+                            setPhoneChangeMessage(null);
+                          }}
+                          inputMode="numeric"
+                          autoComplete="tel-national"
+                          maxLength={PHONE_LENGTH}
+                          className={cn(modalFieldClass, "font-mono")}
+                        />
+                        <Button
+                          type="submit"
+                          disabled={isRequestingPhoneOtp || !isChangePhoneValid || isChangePhoneSame}
+                          className="h-10 shrink-0 rounded-full bg-[#4668d9] px-5 text-white hover:bg-[#5577ea]"
+                        >
+                          {isRequestingPhoneOtp ? "Sending..." : "Send OTP"}
+                        </Button>
+                      </form>
+
+                      {isPhoneChangeOtpRequested ? (
+                        <form onSubmit={handleVerifyPhoneChangeOtp} className="mt-3 flex flex-col gap-3 sm:flex-row">
+                          <input
+                            value={changePhoneOtpInput}
+                            onChange={(event) => setChangePhoneOtpInput(normalizeOtpDraft(event.target.value))}
+                            inputMode="numeric"
+                            autoComplete="one-time-code"
+                            placeholder="6-digit OTP"
+                            maxLength={6}
+                            className={cn(modalFieldClass, "font-mono")}
+                          />
+                          <Button
+                            type="submit"
+                            disabled={isVerifyingPhoneOtp || changePhoneOtpInput.length !== 6}
+                            className="h-10 shrink-0 rounded-full bg-[#10a37f] px-5 text-white hover:bg-[#0d8f6f]"
+                          >
+                            {isVerifyingPhoneOtp ? "Verifying..." : "Verify"}
+                          </Button>
+                        </form>
+                      ) : null}
+
+                      {changePhoneDevOtp ? (
+                        <div
+                          className={cn(
+                            "mt-3 rounded-lg px-3 py-2 text-sm",
+                            modalIsDark ? "bg-[#303030] text-[#b4b4b4]" : "bg-[#f6f6f6] text-[#6f6f6f]",
+                          )}
+                        >
+                          Dev OTP: <span className="font-mono">{changePhoneDevOtp}</span>
+                        </div>
+                      ) : null}
+                      {phoneChangeMessage ? <p className="mt-3 text-sm text-[#10a37f]">{phoneChangeMessage}</p> : null}
+                      {phoneChangeError ? <p className="mt-3 text-sm text-[#ef4444]">{phoneChangeError}</p> : null}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-5">
+                <div className={cn("border-b pb-5", dividerClass)}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <h3 className="font-medium">Base style and tone</h3>
+                      <p className={cn("mt-1 max-w-[340px] text-xs leading-5", mutedTextClass)}>
+                        Set how this assistant responds to you.
+                      </p>
+                    </div>
+                    <select
+                      value={theme}
+                      onChange={(event) => {
+                        const nextTheme = event.target.value as Theme;
+                        setTheme(nextTheme);
+                        window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+                      }}
+                      className={cn(
+                        "h-9 rounded-lg border px-3 text-sm outline-none",
+                        modalIsDark
+                          ? "border-[#3f3f3f] bg-[#303030] text-[#f4f4f4]"
+                          : "border-[#d4d4d4] bg-[#f7f7f7] text-[#171717]",
+                      )}
+                    >
+                      <option value="dark">Night</option>
+                      <option value="light">Light</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className={cn("space-y-4 border-b pb-5", dividerClass)}>
+                  <div>
+                    <h3 className="font-medium">Characteristics</h3>
+                    <p className={cn("mt-1 text-xs", mutedTextClass)}>
+                      Choose additional customizations on top of your base style and tone.
+                    </p>
+                  </div>
+                  {["Warm", "Enthusiastic", "Headers & Lists", "Emoji"].map((label) => (
+                    <div key={label} className="flex h-9 items-center justify-between gap-4">
+                      <span>{label}</span>
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex h-9 items-center gap-2 rounded-lg px-3 text-sm transition",
+                          modalIsDark ? "bg-[#303030] hover:bg-[#3a3a3a]" : "bg-[#f2f2f2] hover:bg-[#e8e8e8]",
+                        )}
+                      >
+                        <span>Default</span>
+                        <ChevronDown className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className={cn("border-b pb-5", dividerClass)}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <h3 className="font-medium">Fast answers</h3>
+                      <p className={cn("mt-1 max-w-[370px] text-xs leading-5", mutedTextClass)}>
+                        Use shorter, faster replies when depth is not needed.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Fast answers enabled"
+                      className="relative h-5 w-9 rounded-full bg-[#4f7df3]"
+                    >
+                      <span className="absolute right-0.5 top-0.5 h-4 w-4 rounded-full bg-white" />
+                    </button>
+                  </div>
+                </div>
+
+                <label className="block space-y-2 text-sm">
+                  <span className="font-medium">Custom instructions</span>
+                  <textarea
+                    value={systemInstruction}
+                    onChange={(event) => handleSystemInstructionChange(event.target.value)}
+                    className={modalTextareaClass}
+                  />
+                </label>
+
+                <div className={cn("border-t pt-5", dividerClass)}>
+                  <h3 className="text-lg font-medium">About you</h3>
+                  <div className="mt-4 space-y-4">
+                    <label className="block space-y-2 text-sm">
+                      <span className="font-medium">Nickname</span>
+                      <input
+                        value={profileFirstName || profileDisplayName}
+                        readOnly
+                        className={cn(modalFieldClass, "cursor-default")}
+                      />
+                    </label>
+                    <label className="block space-y-2 text-sm">
+                      <span className="font-medium">More about you</span>
+                      <input
+                        readOnly
+                        placeholder="Interests, values, or preferences to keep in mind"
+                        className={cn(modalFieldClass, "cursor-default")}
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
+    <SidebarProvider
+      open={isSidebarOpen}
+      onOpenChange={setIsSidebarOpen}
       className={cn(
         "h-screen overflow-hidden font-sans",
         isDark ? "bg-[#212121] text-[#ececec]" : "bg-white text-[#171717]",
       )}
     >
-      <div className="flex h-full">
         <aside
           className={cn(
-            "fixed inset-y-0 left-0 z-40 flex w-[304px] flex-col border-r transition-transform duration-200 md:relative md:translate-x-0",
-            isSidebarOpen ? "translate-x-0" : "-translate-x-full",
+            "fixed inset-y-0 left-0 z-40 flex w-[304px] shrink-0 flex-col border-r transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] will-change-transform md:relative",
+            isSidebarOpen ? "translate-x-0 md:ml-0" : "-translate-x-full md:-ml-[304px] md:translate-x-0",
             isDark ? "border-[#2f2f2f] bg-[#171717]" : "border-[#e5e5e5] bg-[#f9f9f9]",
           )}
         >
@@ -466,23 +1525,20 @@ export function ChatApp() {
             <div className="flex h-9 w-9 items-center justify-center rounded-full">
               <Bot className="h-6 w-6" />
             </div>
-            <button
-              type="button"
+            <SidebarTrigger
               className={cn(
-                "grid h-9 w-9 place-items-center rounded-lg transition",
                 isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#ececec]",
               )}
-              onClick={() => setIsSidebarOpen(false)}
               aria-label="Close sidebar"
             >
               <PanelLeftClose className="h-5 w-5" />
-            </button>
+            </SidebarTrigger>
           </div>
 
           <div className="space-y-2 px-3 pb-3">
             <button
               type="button"
-              onClick={() => void handleCreateConversation()}
+              onClick={handleCreateConversation}
               disabled={!accessToken}
               className={cn(
                 "flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
@@ -535,6 +1591,7 @@ export function ChatApp() {
               </div>
             ) : null}
 
+            {renderConversationGroup("Pinned", groupedConversations.pinned)}
             {renderConversationGroup("Today", groupedConversations.today)}
             {renderConversationGroup("Last week", groupedConversations.lastWeek)}
             {renderConversationGroup("More than 30 days", groupedConversations.olderThan30)}
@@ -542,6 +1599,7 @@ export function ChatApp() {
             {accessToken &&
             !isLoadingConversations &&
             conversations.length > 0 &&
+            !groupedConversations.pinned.length &&
             !groupedConversations.today.length &&
             !groupedConversations.lastWeek.length &&
             !groupedConversations.olderThan30.length ? (
@@ -551,26 +1609,40 @@ export function ChatApp() {
             ) : null}
           </ScrollArea>
 
-          <div className={cn("border-t p-3", isDark ? "border-[#242424]" : "border-[#e9e9e9]")}>
+          <div className={cn("relative border-t p-3", isDark ? "border-[#242424]" : "border-[#e9e9e9]")}>
             <button
               type="button"
-              onClick={() => setIsProfileMenuOpen((value) => !value)}
+              onClick={() => {
+                setIsSidebarProfileMenuOpen((value) => !value);
+                setIsProfileMenuOpen(false);
+              }}
               className={cn(
                 "flex w-full items-center gap-3 rounded-lg p-2 text-left transition",
                 isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#ececec]",
               )}
             >
-              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#0d8bd9] text-xs font-semibold text-white">
-                {getInitials(phoneNumber)}
-              </div>
+              {renderAvatar("h-9 w-9")}
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{phoneNumber || "Guest profile"}</p>
+                <p className="truncate text-sm font-medium">{profileDisplayName}</p>
                 <p className={cn("truncate text-xs", isDark ? "text-[#9b9b9b]" : "text-[#6f6f6f]")}>
-                  Free plan placeholder
+                  {currentUser?.phone_number || phoneNumber || "Not signed in"}
                 </p>
               </div>
               <MoreHorizontal className="h-5 w-5 opacity-70" />
             </button>
+
+            {isSidebarProfileMenuOpen ? (
+              <div
+                className={cn(
+                  "absolute bottom-[72px] left-3 right-3 z-50 rounded-xl border p-2 shadow-2xl",
+                  isDark
+                    ? "border-[#3a3a3a] bg-[#2f2f2f] text-[#ececec]"
+                    : "border-[#dedede] bg-white text-[#171717]",
+                )}
+              >
+                {renderProfileMenu()}
+              </div>
+            ) : null}
           </div>
         </aside>
 
@@ -583,7 +1655,7 @@ export function ChatApp() {
           />
         ) : null}
 
-        <main className="flex min-w-0 flex-1 flex-col">
+        <SidebarInset>
           <header
             className={cn(
               "relative flex h-14 shrink-0 items-center justify-between border-b px-3 md:px-4",
@@ -591,19 +1663,16 @@ export function ChatApp() {
             )}
           >
             <div className="flex min-w-0 items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setIsSidebarOpen(true)}
+              <SidebarTrigger
                 className={cn(
-                  "grid h-9 w-9 place-items-center rounded-lg transition",
                   isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#ececec]",
                 )}
-                aria-label="Open sidebar"
+                aria-label="Toggle sidebar"
               >
                 <Menu className="h-5 w-5" />
-              </button>
+              </SidebarTrigger>
 
-              <div className="relative">
+              <div ref={modelMenuRef} className="relative">
                 <button
                   type="button"
                   onClick={() => setIsModelMenuOpen((value) => !value)}
@@ -660,16 +1729,7 @@ export function ChatApp() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                className={cn(
-                  "hidden h-9 items-center rounded-lg px-3 text-sm font-medium transition sm:flex",
-                  isDark ? "bg-[#303030] hover:bg-[#3a3a3a]" : "bg-[#f2f2f2] hover:bg-[#e7e7e7]",
-                )}
-              >
-                Share
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsSettingsOpen((value) => !value)}
+                onClick={() => openAccountModal("personalization")}
                 className={cn(
                   "grid h-9 w-9 place-items-center rounded-lg transition",
                   isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#ececec]",
@@ -681,11 +1741,14 @@ export function ChatApp() {
               <div className="relative">
                 <button
                   type="button"
-                  onClick={() => setIsProfileMenuOpen((value) => !value)}
-                  className="grid h-9 w-9 place-items-center rounded-full bg-[#0d8bd9] text-xs font-semibold text-white"
+                  onClick={() => {
+                    setIsProfileMenuOpen((value) => !value);
+                    setIsSidebarProfileMenuOpen(false);
+                  }}
+                  className="block h-9 w-9 rounded-full"
                   aria-label="Profile"
                 >
-                  {getInitials(phoneNumber)}
+                  {renderAvatar("h-9 w-9")}
                 </button>
 
                 {isProfileMenuOpen ? (
@@ -697,70 +1760,11 @@ export function ChatApp() {
                         : "border-[#dedede] bg-white text-[#171717]",
                     )}
                   >
-                    <div className="flex items-center gap-3 px-3 py-3">
-                      <div className="grid h-10 w-10 place-items-center rounded-full bg-[#0d8bd9] text-xs font-semibold text-white">
-                        {getInitials(phoneNumber)}
-                      </div>
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{phoneNumber || "Guest profile"}</p>
-                        <p className={cn("truncate text-xs", isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]")}>
-                          Free plan placeholder
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={toggleTheme}
-                      className={cn(
-                        "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
-                        isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
-                      )}
-                    >
-                      {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-                      <span>{isDark ? "Light mode" : "Dark mode"}</span>
-                    </button>
-                    {accessToken ? (
-                      <button
-                        type="button"
-                        onClick={handleSignOut}
-                        className={cn(
-                          "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
-                          isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
-                        )}
-                      >
-                        <LogOut className="h-4 w-4" />
-                        <span>Log out</span>
-                      </button>
-                    ) : null}
+                    {renderProfileMenu()}
                   </div>
                 ) : null}
               </div>
             </div>
-
-            {isSettingsOpen ? (
-              <div
-                className={cn(
-                  "absolute right-16 top-12 z-50 w-[280px] rounded-xl border p-2 shadow-2xl",
-                  isDark
-                    ? "border-[#3a3a3a] bg-[#2f2f2f] text-[#ececec]"
-                    : "border-[#dedede] bg-white text-[#171717]",
-                )}
-              >
-                <label className="block px-3 py-2 text-xs font-medium uppercase opacity-60">
-                  System instruction
-                </label>
-                <Textarea
-                  value={systemInstruction}
-                  onChange={(event) => setSystemInstruction(event.target.value)}
-                  className={cn(
-                    "min-h-28 rounded-lg border px-3 py-2 text-sm",
-                    isDark
-                      ? "border-[#4a4a4a] bg-[#212121] text-[#ececec]"
-                      : "border-[#dedede] bg-white text-[#171717]",
-                  )}
-                />
-              </div>
-            ) : null}
           </header>
 
           <ScrollArea className="min-h-0 flex-1">
@@ -784,6 +1788,7 @@ export function ChatApp() {
                             setIsOtpRequested(false);
                             setOtpInput("");
                             setDevOtp("");
+                            setError(null);
                           }}
                           className={cn(
                             "flex-1 rounded-md px-3 py-2 capitalize transition",
@@ -811,26 +1816,79 @@ export function ChatApp() {
                     </div>
 
                     <div className="space-y-3">
-                      <Input
-                        value={phoneInput}
-                        onChange={(event) => setPhoneInput(event.target.value)}
-                        placeholder="Phone number"
+                      <div
                         className={cn(
-                          "h-11 rounded-lg",
-                          isDark
-                            ? "border-[#4a4a4a] bg-[#212121] text-[#ececec] placeholder:text-[#8b8b8b]"
-                            : "border-[#dedede] bg-white text-[#171717]",
+                          "flex min-h-12 items-center gap-3 rounded-xl border px-3 transition",
+                          isPhoneInputFocused
+                            ? "border-[#10a37f] shadow-[0_0_0_3px_rgba(16,163,127,0.16)]"
+                            : isDark
+                              ? "border-[#4a4a4a]"
+                              : "border-[#dedede]",
+                          isDark ? "bg-[#212121] text-[#ececec]" : "bg-white text-[#171717]",
                         )}
-                      />
+                      >
+                        <span
+                          className={cn(
+                            "grid h-9 w-11 shrink-0 select-none place-items-center rounded-lg font-mono text-sm font-semibold",
+                            isDark ? "bg-[#303030] text-[#ececec]" : "bg-[#f2f2f2] text-[#171717]",
+                          )}
+                        >
+                          {PHONE_PREFIX}
+                        </span>
+                        <div className="relative grid min-w-0 flex-1 grid-cols-9 gap-1.5">
+                          {phoneDigitSlots.map((digit, index) => {
+                            const isCurrentSlot =
+                              isPhoneInputFocused &&
+                              index === Math.min(phoneRestInput.length, PHONE_REST_LENGTH - 1);
+
+                            return (
+                              <span
+                                key={index}
+                                className={cn(
+                                  "grid h-9 min-w-0 place-items-center rounded-md border text-sm font-semibold transition",
+                                  digit
+                                    ? isDark
+                                      ? "border-[#4a4a4a] bg-[#2b2b2b] text-[#ececec]"
+                                      : "border-[#d7d7d7] bg-[#fafafa] text-[#171717]"
+                                    : isDark
+                                      ? "border-[#3a3a3a] bg-[#242424] text-[#6f6f6f]"
+                                      : "border-[#e6e6e6] bg-[#f8f8f8] text-[#b0b0b0]",
+                                  isCurrentSlot ? "border-[#10a37f]" : "",
+                                )}
+                              >
+                                {digit}
+                              </span>
+                            );
+                          })}
+                          <input
+                            value={phoneRestInput}
+                            onChange={(event) => setPhoneInput(normalizePhoneDraft(event.target.value))}
+                            onFocus={() => setIsPhoneInputFocused(true)}
+                            onBlur={() => setIsPhoneInputFocused(false)}
+                            inputMode="numeric"
+                            autoComplete="tel-national"
+                            aria-label="Phone number after 09"
+                            maxLength={PHONE_LENGTH}
+                            className="absolute inset-0 h-full w-full cursor-text bg-transparent text-transparent caret-transparent outline-none"
+                          />
+                        </div>
+                      </div>
+                      {!isPhoneNumberValid && phoneRestInput ? (
+                        <p className={cn("text-xs", isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]")}>
+                          Enter 9 more digits after 09.
+                        </p>
+                      ) : null}
 
                       {isOtpRequested ? (
                         <Input
                           value={otpInput}
-                          onChange={(event) => setOtpInput(event.target.value)}
+                          onChange={(event) => setOtpInput(normalizeOtpDraft(event.target.value))}
                           inputMode="numeric"
+                          autoComplete="one-time-code"
                           placeholder="6-digit OTP"
+                          maxLength={6}
                           className={cn(
-                            "h-11 rounded-lg",
+                            "h-11 rounded-lg font-mono",
                             isDark
                               ? "border-[#4a4a4a] bg-[#212121] text-[#ececec] placeholder:text-[#8b8b8b]"
                               : "border-[#dedede] bg-white text-[#171717]",
@@ -851,7 +1909,7 @@ export function ChatApp() {
 
                       <Button
                         type="submit"
-                        disabled={isAuthenticating}
+                        disabled={isAuthenticating || !isPhoneNumberValid || (isOtpRequested && !isOtpValid)}
                         className="h-11 w-full rounded-full bg-[#10a37f] text-white hover:bg-[#0d8f6f]"
                       >
                         {isAuthenticating ? "Working..." : isOtpRequested ? "Verify OTP" : "Continue"}
@@ -920,31 +1978,39 @@ export function ChatApp() {
           </ScrollArea>
 
           {accessToken ? (
-            <div className="shrink-0 px-3 pb-3 md:px-4">
+            <div className="shrink-0 px-3 pb-4 md:px-4">
               <form
                 onSubmit={handleSendMessage}
                 className={cn(
-                  "mx-auto flex w-full max-w-3xl items-end gap-2 rounded-[28px] border p-2 shadow-lg",
-                  isDark ? "border-[#3a3a3a] bg-[#303030]" : "border-[#dedede] bg-white",
+                  "mx-auto flex w-full max-w-[768px] items-end gap-2 rounded-[28px] border px-3 py-2 shadow-sm",
+                  isDark
+                    ? "border-[#3b3b3b] bg-[#303030] text-[#ececec]"
+                    : "border-[#d9d9d9] bg-white text-[#171717]",
                 )}
               >
                 <button
                   type="button"
                   className={cn(
-                    "grid h-10 w-10 shrink-0 place-items-center rounded-full transition",
-                    isDark ? "hover:bg-[#424242]" : "hover:bg-[#f2f2f2]",
+                    "grid h-9 w-9 shrink-0 place-items-center rounded-full transition",
+                    isDark ? "text-[#f4f4f4] hover:bg-[#3f3f3f]" : "text-[#2f2f2f] hover:bg-[#f2f2f2]",
                   )}
                   aria-label="Attach file"
                 >
-                  <Paperclip className="h-5 w-5" />
+                  <Plus className="h-5 w-5" />
                 </button>
                 <Textarea
+                  ref={draftTextareaRef}
                   value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
+                  onChange={(event) => {
+                    setDraft(event.target.value);
+                    window.requestAnimationFrame(resizeDraftTextarea);
+                  }}
                   placeholder="Ask anything"
                   className={cn(
-                    "max-h-44 min-h-10 resize-none border-0 bg-transparent px-0 py-2 text-[15px] shadow-none outline-none focus-visible:ring-0",
-                    isDark ? "text-[#ececec] placeholder:text-[#b4b4b4]" : "text-[#171717] placeholder:text-[#8a8a8a]",
+                    "!min-h-9 max-h-44 resize-none overflow-hidden !rounded-none !border-0 !bg-transparent !px-0 !py-2 text-[15px] leading-6 !shadow-none outline-none focus-visible:!ring-0",
+                    isDark
+                      ? "!text-[#f4f4f4] !placeholder:text-[#c5c5c5]"
+                      : "!text-[#171717] !placeholder:text-[#6b6b6b]",
                   )}
                   rows={1}
                   onKeyDown={(event) => {
@@ -957,31 +2023,39 @@ export function ChatApp() {
                 <button
                   type="button"
                   className={cn(
-                    "grid h-10 w-10 shrink-0 place-items-center rounded-full transition",
-                    isDark ? "hover:bg-[#424242]" : "hover:bg-[#f2f2f2]",
+                    "grid h-9 w-9 shrink-0 place-items-center rounded-full transition",
+                    isDark ? "text-[#f4f4f4] hover:bg-[#3f3f3f]" : "text-[#2f2f2f] hover:bg-[#f2f2f2]",
                   )}
                   aria-label="Voice input"
                 >
-                  <Mic className="h-5 w-5" />
+                  <Mic className="h-[18px] w-[18px]" />
                 </button>
                 <button
                   type="submit"
                   disabled={!draft.trim() || isSending}
                   className={cn(
-                    "grid h-10 w-10 shrink-0 place-items-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-40",
+                    "grid h-9 w-9 shrink-0 place-items-center rounded-full transition disabled:cursor-not-allowed",
                     draft.trim()
-                      ? "bg-[#ececec] text-[#171717] hover:bg-white"
+                      ? "bg-[#4668d9] text-white hover:bg-[#5577ea]"
                       : isDark
-                        ? "bg-[#424242] text-[#8f8f8f]"
-                        : "bg-[#ececec] text-[#8a8a8a]",
+                        ? "bg-[#424242] text-[#a8a8a8]"
+                        : "bg-[#d7d7d7] text-[#777777]",
                   )}
                   aria-label="Send message"
                 >
-                  {isSending ? <X className="h-5 w-5" /> : <Send className="h-5 w-5" />}
+                  {isSending ? <X className="h-5 w-5" /> : <ArrowUp className="h-5 w-5" />}
                 </button>
               </form>
-              <div className={cn("mx-auto mt-2 max-w-3xl text-center text-xs", isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]")}>
-                GPTClone can make mistakes. Check important info.
+              <div
+                className={cn(
+                  "mx-auto mt-2 max-w-[768px] text-center text-xs leading-4",
+                  isDark ? "text-[#d1d1d1]" : "text-[#5f5f5f]",
+                )}
+              >
+                ChatGPT can make mistakes. Check important info.{" "}
+                <button type="button" className="underline underline-offset-2">
+                  See Cookie Preferences.
+                </button>
               </div>
             </div>
           ) : null}
@@ -991,8 +2065,8 @@ export function ChatApp() {
               {error}
             </div>
           ) : null}
-        </main>
-      </div>
-    </div>
+        </SidebarInset>
+        {renderAccountModal()}
+    </SidebarProvider>
   );
 }
