@@ -51,25 +51,13 @@ def _build_vllm_client(model: str) -> LangfuseOpenAI:
     )
 
 
-# Flow 6: called by request_vllm_chat() to extract text that the view saves and returns.
-def _get_assistant_content(completion) -> str:
-    choices = getattr(completion, "choices", None) or []
-    first_choice = choices[0] if choices else None
-    message = getattr(first_choice, "message", None)
-    content = getattr(message, "content", "") if message else ""
-    return (content or "").strip()
-
-
-# Flow 5: called by the view with prepared messages; traces, calls vLLM, then returns assistant text.
-def request_vllm_chat(
+def _build_trace_context(
     *,
     model: str,
-    messages: list[dict[str, str]],
     langfuse_session_id: str | None = None,
     langfuse_user_id: str | None = None,
     langfuse_metadata: dict | None = None,
-) -> str:
-    endpoint = f"{get_vllm_base_url(model).rstrip('/')}/chat/completions"
+) -> dict:
     raw_trace_metadata = {
         "provider": "vllm",
         "model": model,
@@ -89,6 +77,53 @@ def request_vllm_chat(
         trace_context["session_id"] = langfuse_session_id
     if langfuse_user_id:
         trace_context["user_id"] = langfuse_user_id
+    return trace_context
+
+
+def _format_vllm_error(exc: OpenAIError, endpoint: str) -> RuntimeError:
+    if isinstance(exc, APIStatusError):
+        details = getattr(exc.response, "text", "") or str(exc)
+        return RuntimeError(f"vLLM HTTP error {exc.status_code}: {details}")
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return RuntimeError(f"Could not reach vLLM at {endpoint}: {exc}")
+    return RuntimeError(f"vLLM request failed: {exc}")
+
+
+# Flow 6: called by request_vllm_chat() to extract text that the view saves and returns.
+def _get_assistant_content(completion) -> str:
+    choices = getattr(completion, "choices", None) or []
+    first_choice = choices[0] if choices else None
+    message = getattr(first_choice, "message", None)
+    content = getattr(message, "content", "") if message else ""
+    return (content or "").strip()
+
+
+def _get_assistant_delta(chunk) -> str:
+    choices = getattr(chunk, "choices", None) or []
+    first_choice = choices[0] if choices else None
+    delta = getattr(first_choice, "delta", None)
+    content = getattr(delta, "content", "") if delta else ""
+    if content is None:
+        return ""
+    return str(content)
+
+
+# Flow 5: called by the view with prepared messages; traces, calls vLLM, then returns assistant text.
+def request_vllm_chat(
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    langfuse_session_id: str | None = None,
+    langfuse_user_id: str | None = None,
+    langfuse_metadata: dict | None = None,
+) -> str:
+    endpoint = f"{get_vllm_base_url(model).rstrip('/')}/chat/completions"
+    trace_context = _build_trace_context(
+        model=model,
+        langfuse_session_id=langfuse_session_id,
+        langfuse_user_id=langfuse_user_id,
+        langfuse_metadata=langfuse_metadata,
+    )
 
     try:
         with propagate_attributes(**trace_context):
@@ -97,16 +132,42 @@ def request_vllm_chat(
                 messages=messages,
                 stream=False,
             )
-    except APIStatusError as exc:
-        details = getattr(exc.response, "text", "") or str(exc)
-        raise RuntimeError(f"vLLM HTTP error {exc.status_code}: {details}") from exc
-    except (APIConnectionError, APITimeoutError) as exc:
-        raise RuntimeError(f"Could not reach vLLM at {endpoint}: {exc}") from exc
     except OpenAIError as exc:
-        raise RuntimeError(f"vLLM request failed: {exc}") from exc
+        raise _format_vllm_error(exc, endpoint) from exc
 
     content = _get_assistant_content(completion)
     if not content:
         raise RuntimeError("vLLM returned an empty assistant message.")
 
     return content
+
+
+def stream_vllm_chat(
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    langfuse_session_id: str | None = None,
+    langfuse_user_id: str | None = None,
+    langfuse_metadata: dict | None = None,
+):
+    endpoint = f"{get_vllm_base_url(model).rstrip('/')}/chat/completions"
+    trace_context = _build_trace_context(
+        model=model,
+        langfuse_session_id=langfuse_session_id,
+        langfuse_user_id=langfuse_user_id,
+        langfuse_metadata=langfuse_metadata,
+    )
+
+    try:
+        with propagate_attributes(**trace_context):
+            stream = _build_vllm_client(model).chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = _get_assistant_delta(chunk)
+                if delta:
+                    yield delta
+    except OpenAIError as exc:
+        raise _format_vllm_error(exc, endpoint) from exc

@@ -22,6 +22,25 @@ export interface ConversationDetail extends Conversation {
   active_model?: string;
 }
 
+export type ChatStreamEvent =
+  | {
+      type: "conversation";
+      conversation: ConversationDetail;
+    }
+  | {
+      type: "delta";
+      delta: string;
+    }
+  | {
+      type: "done";
+      conversation: ConversationDetail;
+    }
+  | {
+      type: "error";
+      detail: string;
+      error?: string;
+    };
+
 export interface AuthUser {
   id: number;
   phone_number: string;

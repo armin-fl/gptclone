@@ -40,13 +40,13 @@ import {
   refreshAuthToken,
   requestPhoneChangeOtp,
   requestOtp,
-  sendMessage,
+  streamMessage,
   updateConversation,
   updateMe,
   verifyPhoneChangeOtp,
   verifyOtp,
 } from "@/lib/api";
-import type { AuthUser, Conversation, ConversationDetail } from "@/lib/types";
+import type { AuthUser, ChatMessage, Conversation, ConversationDetail } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -63,12 +63,20 @@ const PHONE_PREFIX = "09";
 const PHONE_REST_LENGTH = 9;
 const PHONE_LENGTH = PHONE_PREFIX.length + PHONE_REST_LENGTH;
 const PHONE_NUMBER_PATTERN = /^09[0-9]{9}$/;
+const CHAT_BOTTOM_THRESHOLD = 56;
 const DEFAULT_SYSTEM_INSTRUCTION =
   "You are a helpful AI assistant. Use concise and actionable answers unless the user asks for detail.";
 
 type Theme = "dark" | "light";
 type AuthMode = "login" | "register";
 type AccountTab = "profile" | "personalization";
+type MessageMarkdownBlock =
+  | { type: "blockquote"; content: string }
+  | { type: "code"; content: string; language?: string }
+  | { type: "heading"; content: string; level: number }
+  | { type: "ordered-list"; items: string[] }
+  | { type: "paragraph"; content: string }
+  | { type: "unordered-list"; items: string[] };
 
 interface AuthSession {
   access: string;
@@ -233,6 +241,368 @@ function groupConversations(conversations: Conversation[], query: string) {
   };
 }
 
+function getMessagePreview(content: string): string {
+  return content.length > 120 ? `${content.slice(0, 120)}...` : content;
+}
+
+function stripTrailingUrlPunctuation(value: string): { trailing: string; url: string } {
+  const match = value.match(/[),.;:!?]+$/);
+  if (!match) {
+    return { trailing: "", url: value };
+  }
+
+  return {
+    trailing: match[0],
+    url: value.slice(0, -match[0].length),
+  };
+}
+
+function getUrlHref(value: string): string {
+  return value.startsWith("www.") ? `https://${value}` : value;
+}
+
+function isUrlText(value: string): boolean {
+  return /^(https?:\/\/|www\.)\S+$/i.test(value.trim());
+}
+
+function renderInlineMarkdown(text: string, isDark: boolean): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  const pattern = /(`+)([^`]+?)\1|\[([^\]\n]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<`]+|www\.[^\s<`]+)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+
+    if (match[2] !== undefined) {
+      parts.push(
+        <code
+          key={`code-${match.index}`}
+          dir="ltr"
+          className={cn(
+            "rounded px-1 py-0.5 font-mono text-[0.9em]",
+            isDark ? "bg-[#1f1f1f] text-[#f1f1f1]" : "bg-[#ececec] text-[#171717]",
+          )}
+        >
+          {match[2]}
+        </code>,
+      );
+    } else if (match[3] !== undefined && match[4] !== undefined) {
+      const isUrlLabel = isUrlText(match[3]);
+      parts.push(
+        <a
+          key={`link-${match.index}`}
+          dir={isUrlLabel ? "ltr" : "auto"}
+          href={match[4]}
+          target="_blank"
+          rel="noreferrer"
+          className={cn("underline underline-offset-2", isUrlLabel ? "chat-ltr-text break-all" : "")}
+        >
+          {match[3]}
+        </a>,
+      );
+    } else if (match[5] !== undefined) {
+      const { trailing, url } = stripTrailingUrlPunctuation(match[5]);
+      parts.push(
+        <a
+          key={`url-${match.index}`}
+          dir="ltr"
+          href={getUrlHref(url)}
+          target="_blank"
+          rel="noreferrer"
+          className="chat-ltr-text break-all underline underline-offset-2"
+        >
+          {url}
+        </a>,
+      );
+      if (trailing) {
+        parts.push(trailing);
+      }
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts;
+}
+
+function isJsonBlock(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || !/^[{[]/.test(trimmed)) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === "object" && parsed !== null;
+  } catch {
+    return false;
+  }
+}
+
+function isTerminalCommandBlock(value: string): boolean {
+  const lines = value.split("\n").filter((line) => line.trim());
+  return lines.length > 0 && lines.every((line) => /^\s*\$\s+\S+/.test(line));
+}
+
+function parseMessageMarkdown(content: string): MessageMarkdownBlock[] {
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  const blocks: MessageMarkdownBlock[] = [];
+  let paragraphLines: string[] = [];
+
+  const flushParagraph = () => {
+    if (!paragraphLines.length) {
+      return;
+    }
+
+    const content = paragraphLines.join("\n");
+    if (isJsonBlock(content) || isTerminalCommandBlock(content)) {
+      blocks.push({ type: "code", content });
+    } else {
+      blocks.push({ type: "paragraph", content });
+    }
+    paragraphLines = [];
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fenceMatch = line.match(/^\s*(```+|~~~+)\s*([\w-]+)?\s*$/);
+    if (fenceMatch) {
+      flushParagraph();
+      const fence = fenceMatch[1];
+      const language = fenceMatch[2];
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !new RegExp(`^\\s*${fence}\\s*$`).test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push({ type: "code", content: codeLines.join("\n"), language });
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      blocks.push({
+        type: "heading",
+        level: headingMatch[1].length,
+        content: headingMatch[2],
+      });
+      continue;
+    }
+
+    const unorderedMatch = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (unorderedMatch) {
+      flushParagraph();
+      const items = [unorderedMatch[1]];
+      while (index + 1 < lines.length) {
+        const nextMatch = lines[index + 1].match(/^\s*[-*+]\s+(.+)$/);
+        if (!nextMatch) {
+          break;
+        }
+        items.push(nextMatch[1]);
+        index += 1;
+      }
+      blocks.push({ type: "unordered-list", items });
+      continue;
+    }
+
+    const orderedMatch = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (orderedMatch) {
+      flushParagraph();
+      const items = [orderedMatch[1]];
+      while (index + 1 < lines.length) {
+        const nextMatch = lines[index + 1].match(/^\s*\d+[.)]\s+(.+)$/);
+        if (!nextMatch) {
+          break;
+        }
+        items.push(nextMatch[1]);
+        index += 1;
+      }
+      blocks.push({ type: "ordered-list", items });
+      continue;
+    }
+
+    const quoteMatch = line.match(/^>\s?(.*)$/);
+    if (quoteMatch) {
+      flushParagraph();
+      const quoteLines = [quoteMatch[1]];
+      while (index + 1 < lines.length) {
+        const nextMatch = lines[index + 1].match(/^>\s?(.*)$/);
+        if (!nextMatch) {
+          break;
+        }
+        quoteLines.push(nextMatch[1]);
+        index += 1;
+      }
+      blocks.push({ type: "blockquote", content: quoteLines.join("\n") });
+      continue;
+    }
+
+    paragraphLines.push(line);
+  }
+
+  flushParagraph();
+  return blocks;
+}
+
+function renderMessageBlock(block: MessageMarkdownBlock, index: number, isDark: boolean) {
+  if (block.type === "code") {
+    return (
+      <pre
+        key={index}
+        dir="ltr"
+        className={cn(
+          "overflow-x-auto rounded-xl px-3 py-2 text-start text-[13px] leading-6",
+          isDark ? "bg-[#1f1f1f] text-[#f1f1f1]" : "bg-[#ececec] text-[#171717]",
+        )}
+      >
+        <code dir="ltr" className="font-mono" data-language={block.language}>
+          {block.content}
+        </code>
+      </pre>
+    );
+  }
+
+  if (block.type === "heading") {
+    const content = renderInlineMarkdown(block.content, isDark);
+    if (block.level === 1) {
+      return (
+        <h1 key={index} dir="auto" className="font-semibold">
+          {content}
+        </h1>
+      );
+    }
+    if (block.level === 2) {
+      return (
+        <h2 key={index} dir="auto" className="font-semibold">
+          {content}
+        </h2>
+      );
+    }
+    if (block.level === 3) {
+      return (
+        <h3 key={index} dir="auto" className="font-semibold">
+          {content}
+        </h3>
+      );
+    }
+    if (block.level === 4) {
+      return (
+        <h4 key={index} dir="auto" className="font-semibold">
+          {content}
+        </h4>
+      );
+    }
+    if (block.level === 5) {
+      return (
+        <h5 key={index} dir="auto" className="font-semibold">
+          {content}
+        </h5>
+      );
+    }
+
+    return (
+      <h6 key={index} dir="auto" className="font-semibold">
+        {content}
+      </h6>
+    );
+  }
+
+  if (block.type === "unordered-list") {
+    return (
+      <ul key={index} dir="auto" className="list-disc space-y-1 ps-5">
+        {block.items.map((item, itemIndex) => (
+          <li key={itemIndex} dir="auto">
+            {renderInlineMarkdown(item, isDark)}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  if (block.type === "ordered-list") {
+    return (
+      <ol key={index} dir="auto" className="list-decimal space-y-1 ps-5">
+        {block.items.map((item, itemIndex) => (
+          <li key={itemIndex} dir="auto">
+            {renderInlineMarkdown(item, isDark)}
+          </li>
+        ))}
+      </ol>
+    );
+  }
+
+  if (block.type === "blockquote") {
+    return (
+      <blockquote
+        key={index}
+        dir="auto"
+        className={cn(
+          "border-s-2 ps-3",
+          isDark ? "border-[#4a4a4a] text-[#d7d7d7]" : "border-[#d0d0d0] text-[#3f3f3f]",
+        )}
+      >
+        {renderInlineMarkdown(block.content, isDark)}
+      </blockquote>
+    );
+  }
+
+  return (
+    <p key={index} dir="auto" className="whitespace-pre-wrap">
+      {renderInlineMarkdown(block.content, isDark)}
+    </p>
+  );
+}
+
+function MessageMarkdown({ content, isDark }: { content: string; isDark: boolean }) {
+  const blocks = parseMessageMarkdown(content);
+
+  return (
+    <div className="space-y-3 text-start" dir="auto">
+      {blocks.map((block, index) => renderMessageBlock(block, index, isDark))}
+    </div>
+  );
+}
+
+function toConversationSummary(conversation: ConversationDetail): Conversation {
+  let lastMessage: ChatMessage | undefined;
+  for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+    if (conversation.messages[index].content.trim()) {
+      lastMessage = conversation.messages[index];
+      break;
+    }
+  }
+
+  return {
+    id: conversation.id,
+    title: conversation.title,
+    user_phone_number: conversation.user_phone_number,
+    is_pinned: conversation.is_pinned,
+    created_at: conversation.created_at,
+    updated_at: conversation.updated_at,
+    last_message_preview: lastMessage
+      ? getMessagePreview(lastMessage.content)
+      : conversation.last_message_preview ?? "",
+  };
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof DOMException !== "undefined" && error instanceof DOMException && error.name === "AbortError";
+}
+
 export function ChatApp() {
   const [phoneNumber, setPhoneNumber] = useState("");
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
@@ -270,6 +640,7 @@ export function ChatApp() {
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [changePhoneInput, setChangePhoneInput] = useState(PHONE_PREFIX);
   const [changePhoneOtpInput, setChangePhoneOtpInput] = useState("");
   const [changePhoneDevOtp, setChangePhoneDevOtp] = useState("");
@@ -279,8 +650,19 @@ export function ChatApp() {
   const [phoneChangeMessage, setPhoneChangeMessage] = useState<string | null>(null);
   const [phoneChangeError, setPhoneChangeError] = useState<string | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
-  const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+  const chatScrollAreaRef = useRef<HTMLDivElement | null>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const draftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const bottomStateFrameRef = useRef<number | null>(null);
+  const contentNoticeFrameRef = useRef<number | null>(null);
+  const hideJumpFrameRef = useRef<number | null>(null);
+  const scrollFrameRef = useRef<number | null>(null);
+  const isAtBottomRef = useRef(true);
+  const previousMessagesKeyRef = useRef("");
+  const skipNextContentNoticeRef = useRef(0);
+  const hasScrolledForCurrentResponseRef = useRef(false);
+  const streamAbortControllerRef = useRef<AbortController | null>(null);
+  const isSendingRef = useRef(false);
 
   const isDark = theme === "dark";
   const activeConversationId = activeConversation?.id;
@@ -303,6 +685,92 @@ export function ChatApp() {
     () => groupConversations(conversations, searchQuery),
     [conversations, searchQuery],
   );
+  const messageContentKey = useMemo(
+    () =>
+      activeConversation?.messages
+        .map((message) => `${message.id}:${message.role}:${message.content.length}:${message.content}`)
+        .join("\n") ?? "",
+    [activeConversation?.messages],
+  );
+
+  const hideJumpToLatest = useCallback(() => {
+    if (hideJumpFrameRef.current !== null) {
+      return;
+    }
+
+    hideJumpFrameRef.current = window.requestAnimationFrame(() => {
+      hideJumpFrameRef.current = null;
+      setShowJumpToLatest(false);
+    });
+  }, []);
+
+  const updateBottomState = useCallback(() => {
+    const scrollArea = chatScrollAreaRef.current;
+    if (!scrollArea) {
+      return;
+    }
+
+    const distanceToBottom =
+      scrollArea.scrollHeight - scrollArea.scrollTop - scrollArea.clientHeight;
+    const isAtBottom = distanceToBottom <= CHAT_BOTTOM_THRESHOLD;
+    isAtBottomRef.current = isAtBottom;
+    if (isAtBottom) {
+      hideJumpToLatest();
+    }
+  }, [hideJumpToLatest]);
+
+  const scheduleBottomStateUpdate = useCallback(() => {
+    if (bottomStateFrameRef.current !== null) {
+      return;
+    }
+
+    bottomStateFrameRef.current = window.requestAnimationFrame(() => {
+      bottomStateFrameRef.current = null;
+      updateBottomState();
+    });
+  }, [updateBottomState]);
+
+  const scrollToLatest = useCallback(
+    (behavior: ScrollBehavior = "smooth") => {
+      if (scrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+
+      hideJumpToLatest();
+      scrollFrameRef.current = window.requestAnimationFrame(() => {
+        scrollFrameRef.current = null;
+        const bottomSentinel = bottomSentinelRef.current;
+        if (bottomSentinel) {
+          bottomSentinel.scrollIntoView({ behavior, block: "end" });
+        } else {
+          const scrollArea = chatScrollAreaRef.current;
+          scrollArea?.scrollTo({ behavior, top: scrollArea.scrollHeight });
+        }
+        window.requestAnimationFrame(updateBottomState);
+      });
+    },
+    [hideJumpToLatest, updateBottomState],
+  );
+
+  const skipNextJumpNotice = useCallback(() => {
+    skipNextContentNoticeRef.current += 1;
+  }, []);
+
+  const scrollToLatestForNewContent = useCallback(
+    (behavior: ScrollBehavior = "smooth") => {
+      skipNextJumpNotice();
+      scrollToLatest(behavior);
+    },
+    [scrollToLatest, skipNextJumpNotice],
+  );
+
+  const handleChatScroll = useCallback(() => {
+    scheduleBottomStateUpdate();
+  }, [scheduleBottomStateUpdate]);
+
+  const handleJumpToLatest = useCallback(() => {
+    scrollToLatest("smooth");
+  }, [scrollToLatest]);
 
   const persistAuthSession = useCallback((nextSession: AuthSession) => {
     setAuthSession(nextSession);
@@ -439,8 +907,100 @@ export function ChatApp() {
   }, [authSession, performAuthenticated]);
 
   useEffect(() => {
-    scrollAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [activeConversation?.messages]);
+    previousMessagesKeyRef.current = "";
+    hideJumpToLatest();
+    scheduleBottomStateUpdate();
+  }, [activeConversationId, hideJumpToLatest, scheduleBottomStateUpdate]);
+
+  useEffect(() => {
+    const root = chatScrollAreaRef.current;
+    const sentinel = bottomSentinelRef.current;
+    if (!root || !sentinel) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        const isAtBottom = Boolean(entry?.isIntersecting);
+        isAtBottomRef.current = isAtBottom;
+        if (isAtBottom) {
+          hideJumpToLatest();
+        }
+      },
+      {
+        root,
+        rootMargin: `0px 0px ${CHAT_BOTTOM_THRESHOLD}px 0px`,
+        threshold: 0,
+      },
+    );
+
+    observer.observe(sentinel);
+    updateBottomState();
+
+    return () => observer.disconnect();
+  }, [activeConversationId, activeConversation?.messages.length, hideJumpToLatest, updateBottomState]);
+
+  useEffect(() => {
+    if (!messageContentKey) {
+      previousMessagesKeyRef.current = "";
+      hideJumpToLatest();
+      return;
+    }
+
+    const previousKey = previousMessagesKeyRef.current;
+    if (!previousKey) {
+      previousMessagesKeyRef.current = messageContentKey;
+      if (skipNextContentNoticeRef.current > 0) {
+        skipNextContentNoticeRef.current -= 1;
+      }
+      scheduleBottomStateUpdate();
+      return;
+    }
+
+    if (previousKey === messageContentKey) {
+      return;
+    }
+
+    previousMessagesKeyRef.current = messageContentKey;
+    if (contentNoticeFrameRef.current !== null) {
+      return;
+    }
+
+    contentNoticeFrameRef.current = window.requestAnimationFrame(() => {
+      contentNoticeFrameRef.current = null;
+      updateBottomState();
+
+      if (skipNextContentNoticeRef.current > 0) {
+        skipNextContentNoticeRef.current -= 1;
+        return;
+      }
+
+      if (!isAtBottomRef.current) {
+        setShowJumpToLatest(true);
+      }
+    });
+  }, [hideJumpToLatest, messageContentKey, scheduleBottomStateUpdate, updateBottomState]);
+
+  useEffect(() => {
+    return () => {
+      if (bottomStateFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomStateFrameRef.current);
+      }
+      if (contentNoticeFrameRef.current !== null) {
+        window.cancelAnimationFrame(contentNoticeFrameRef.current);
+      }
+      if (hideJumpFrameRef.current !== null) {
+        window.cancelAnimationFrame(hideJumpFrameRef.current);
+      }
+      if (scrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    isSendingRef.current = isSending;
+  }, [isSending]);
 
   useEffect(() => {
     if (!isModelMenuOpen) {
@@ -474,7 +1034,7 @@ export function ChatApp() {
   }, [openConversationMenuId]);
 
   useEffect(() => {
-    if (!authSession) {
+    if (!authSession || isSendingRef.current) {
       return;
     }
 
@@ -506,6 +1066,7 @@ export function ChatApp() {
         const detail = await performAuthenticated((access) => getConversation(targetId, access));
         if (!isCancelled) {
           setActiveConversation(detail);
+          scrollToLatest("auto");
         }
       } catch (err) {
         if (!isCancelled) {
@@ -522,7 +1083,13 @@ export function ChatApp() {
       isCancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [authSession, activeConversationId, isComposingNewChat, performAuthenticated]);
+  }, [
+    authSession,
+    activeConversationId,
+    isComposingNewChat,
+    performAuthenticated,
+    scrollToLatest,
+  ]);
 
   function toggleTheme() {
     const nextTheme = isDark ? "light" : "dark";
@@ -722,6 +1289,7 @@ export function ChatApp() {
       setActiveConversation(detail);
       setIsComposingNewChat(false);
       setOpenConversationMenuId(null);
+      scrollToLatest("auto");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to open conversation.");
     }
@@ -814,6 +1382,10 @@ export function ChatApp() {
 
     setIsSending(true);
     setError(null);
+    const abortController = new AbortController();
+    streamAbortControllerRef.current = abortController;
+    let streamingConversationId = "";
+    let pendingAssistantMessageId = 0;
 
     try {
       let conversation = activeConversation;
@@ -821,25 +1393,124 @@ export function ChatApp() {
         conversation = await performAuthenticated((access) => createConversation(access));
       }
 
-      const updated = await performAuthenticated((access) =>
-        sendMessage(conversation.id, access, {
-          content: message,
-          model: selectedModel,
-          system_instruction: systemInstruction.trim() || undefined,
-        }),
-      );
+      streamingConversationId = conversation.id;
+      const pendingIdSeed = Date.now();
+      const createdAt = new Date().toISOString();
+      const pendingUserMessage: ChatMessage = {
+        id: -pendingIdSeed,
+        role: "user",
+        content: message,
+        created_at: createdAt,
+      };
+      const pendingAssistantMessage: ChatMessage = {
+        id: -pendingIdSeed - 1,
+        role: "assistant",
+        content: "",
+        created_at: createdAt,
+      };
+      pendingAssistantMessageId = pendingAssistantMessage.id;
+      const optimisticConversation: ConversationDetail = {
+        ...conversation,
+        messages: [...conversation.messages, pendingUserMessage, pendingAssistantMessage],
+      };
 
       setDraft("");
       setIsComposingNewChat(false);
-      setActiveConversation(updated);
+      hasScrolledForCurrentResponseRef.current = false;
+      setActiveConversation(optimisticConversation);
       setConversations((prev) => {
-        const rest = prev.filter((item) => item.id !== updated.id);
-        return [updated, ...rest];
+        const rest = prev.filter((item) => item.id !== optimisticConversation.id);
+        return [toConversationSummary(optimisticConversation), ...rest];
       });
+      scrollToLatestForNewContent("smooth");
+
+      await performAuthenticated((access) =>
+        streamMessage(
+          conversation.id,
+          access,
+          {
+            content: message,
+            model: selectedModel,
+            system_instruction: systemInstruction.trim() || undefined,
+          },
+          (streamEvent) => {
+            if (streamEvent.type === "conversation") {
+              setActiveConversation((prev) => {
+                if (prev?.id !== conversation.id) {
+                  return prev;
+                }
+
+                const pendingAssistant = prev.messages.find(
+                  (item) => item.id === pendingAssistantMessageId,
+                );
+                return {
+                  ...streamEvent.conversation,
+                  messages: pendingAssistant
+                    ? [...streamEvent.conversation.messages, pendingAssistant]
+                    : streamEvent.conversation.messages,
+                };
+              });
+              setConversations((prev) => {
+                const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
+                return [toConversationSummary(streamEvent.conversation), ...rest];
+              });
+              return;
+            }
+
+            if (streamEvent.type === "delta") {
+              if (!hasScrolledForCurrentResponseRef.current) {
+                hasScrolledForCurrentResponseRef.current = true;
+                scrollToLatestForNewContent("smooth");
+              }
+
+              setActiveConversation((prev) =>
+                prev?.id === conversation.id
+                  ? {
+                      ...prev,
+                      messages: prev.messages.map((item) =>
+                        item.id === pendingAssistantMessageId
+                          ? { ...item, content: item.content + streamEvent.delta }
+                          : item,
+                      ),
+                    }
+                  : prev,
+              );
+              return;
+            }
+
+            if (streamEvent.type === "done") {
+              setActiveConversation(streamEvent.conversation);
+              setConversations((prev) => {
+                const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
+                return [toConversationSummary(streamEvent.conversation), ...rest];
+              });
+            }
+          },
+          abortController.signal,
+        ),
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to send message.");
+      setActiveConversation((prev) => {
+        if (!streamingConversationId || prev?.id !== streamingConversationId) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          messages: prev.messages.filter(
+            (item) => item.id !== pendingAssistantMessageId || item.content.trim(),
+          ),
+        };
+      });
+
+      if (!isAbortError(err)) {
+        setError(err instanceof Error ? err.message : "Failed to send message.");
+      }
     } finally {
       setIsSending(false);
+      if (streamAbortControllerRef.current === abortController) {
+        streamAbortControllerRef.current = null;
+      }
     }
   }
 
@@ -994,7 +1665,7 @@ export function ChatApp() {
                 type="button"
                 onClick={() => void handleSelectConversation(conversation.id)}
                 className={cn(
-                  "group flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-sm transition",
+                  "group flex h-9 w-full items-center gap-2 rounded-lg px-3 text-start text-sm transition",
                   activeConversationId === conversation.id
                     ? isDark
                       ? "bg-[#303030] text-[#ececec]"
@@ -1050,7 +1721,7 @@ export function ChatApp() {
                   type="button"
                   onClick={() => startRenameConversation(conversation)}
                   className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition",
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-start text-sm transition",
                     isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
                   )}
                 >
@@ -1061,7 +1732,7 @@ export function ChatApp() {
                   type="button"
                   onClick={() => void handleTogglePinConversation(conversation)}
                   className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition",
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-start text-sm transition",
                     isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
                   )}
                 >
@@ -1072,7 +1743,7 @@ export function ChatApp() {
                   type="button"
                   onClick={() => void handleDeleteConversation(conversation)}
                   className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-[#ef4444] transition",
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-start text-sm text-[#ef4444] transition",
                     isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#fef2f2]",
                   )}
                 >
@@ -1472,6 +2143,7 @@ export function ChatApp() {
                   <textarea
                     value={systemInstruction}
                     onChange={(event) => handleSystemInstructionChange(event.target.value)}
+                    dir="auto"
                     className={modalTextareaClass}
                   />
                 </label>
@@ -1541,7 +2213,7 @@ export function ChatApp() {
               onClick={handleCreateConversation}
               disabled={!accessToken}
               className={cn(
-                "flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
+                "flex h-10 w-full items-center gap-3 rounded-lg px-3 text-start text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
                 isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#ececec]",
               )}
             >
@@ -1617,7 +2289,7 @@ export function ChatApp() {
                 setIsProfileMenuOpen(false);
               }}
               className={cn(
-                "flex w-full items-center gap-3 rounded-lg p-2 text-left transition",
+                "flex w-full items-center gap-3 rounded-lg p-2 text-start transition",
                 isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#ececec]",
               )}
             >
@@ -1707,7 +2379,7 @@ export function ChatApp() {
                           setIsModelMenuOpen(false);
                         }}
                         className={cn(
-                          "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
+                          "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-start text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
                           isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
                         )}
                       >
@@ -1767,8 +2439,13 @@ export function ChatApp() {
             </div>
           </header>
 
-          <ScrollArea className="min-h-0 flex-1">
-            <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-4 py-8 md:px-6">
+          <div className="relative min-h-0 flex-1">
+            <ScrollArea
+              ref={chatScrollAreaRef}
+              onScroll={handleChatScroll}
+              className="h-full min-h-0"
+            >
+              <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-4 py-8 md:px-6">
               {!accessToken ? (
                 <div className="flex flex-1 items-center justify-center">
                   <form
@@ -1953,29 +2630,65 @@ export function ChatApp() {
                           ) : null}
 
                           <div
+                            dir="auto"
                             className={cn(
-                              "max-w-[82%] whitespace-pre-wrap text-[15px] leading-7",
+                              "max-w-[82%] text-[15px] leading-7",
                               message.role === "user"
                                 ? isDark
                                   ? "rounded-3xl bg-[#303030] px-5 py-3"
                                   : "rounded-3xl bg-[#f4f4f4] px-5 py-3"
                                 : "",
-                            )}
-                          >
-                            {message.content}
-                            <div className={cn("mt-1 text-xs", isDark ? "text-[#8f8f8f]" : "text-[#8a8a8a]")}>
+                          )}
+                        >
+                            <div className="chat-message-content" dir="auto">
+                              {message.content ? (
+                                <MessageMarkdown content={message.content} isDark={isDark} />
+                              ) : null}
+                              {message.role === "assistant" && message.id < 0 && !message.content ? (
+                                <span
+                                  dir="auto"
+                                  className={cn(isDark ? "text-[#a8a8a8]" : "text-[#6f6f6f]")}
+                                >
+                                  Thinking...
+                                </span>
+                              ) : null}
+                            </div>
+                            <div
+                              dir="ltr"
+                              className={cn(
+                                "mt-1 text-start text-xs",
+                                isDark ? "text-[#8f8f8f]" : "text-[#8a8a8a]",
+                              )}
+                            >
                               {formatTime(message.created_at)}
                             </div>
                           </div>
                         </div>
                       ))}
-                      <div ref={scrollAnchorRef} />
+                      <div ref={bottomSentinelRef} className="h-px" />
                     </div>
                   )}
                 </div>
               )}
             </div>
-          </ScrollArea>
+            </ScrollArea>
+
+            {showJumpToLatest ? (
+              <button
+                type="button"
+                onClick={handleJumpToLatest}
+                className={cn(
+                  "absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-full border px-3 py-2 text-sm shadow-lg transition",
+                  isDark
+                    ? "border-[#3f3f3f] bg-[#2f2f2f] text-[#f4f4f4] hover:bg-[#3a3a3a]"
+                    : "border-[#dedede] bg-white text-[#171717] hover:bg-[#f4f4f4]",
+                )}
+              >
+                <ChevronDown className="h-4 w-4" />
+                <span>Jump to latest</span>
+              </button>
+            ) : null}
+          </div>
 
           {accessToken ? (
             <div className="shrink-0 px-3 pb-4 md:px-4">
@@ -2006,6 +2719,7 @@ export function ChatApp() {
                     window.requestAnimationFrame(resizeDraftTextarea);
                   }}
                   placeholder="Ask anything"
+                  dir="auto"
                   className={cn(
                     "!min-h-9 max-h-44 resize-none overflow-hidden !rounded-none !border-0 !bg-transparent !px-0 !py-2 text-[15px] leading-6 !shadow-none outline-none focus-visible:!ring-0",
                     isDark
@@ -2032,16 +2746,22 @@ export function ChatApp() {
                 </button>
                 <button
                   type="submit"
-                  disabled={!draft.trim() || isSending}
+                  disabled={!draft.trim() && !isSending}
+                  onClick={(event) => {
+                    if (isSending) {
+                      event.preventDefault();
+                      streamAbortControllerRef.current?.abort();
+                    }
+                  }}
                   className={cn(
                     "grid h-9 w-9 shrink-0 place-items-center rounded-full transition disabled:cursor-not-allowed",
-                    draft.trim()
+                    draft.trim() || isSending
                       ? "bg-[#4668d9] text-white hover:bg-[#5577ea]"
                       : isDark
                         ? "bg-[#424242] text-[#a8a8a8]"
                         : "bg-[#d7d7d7] text-[#777777]",
                   )}
-                  aria-label="Send message"
+                  aria-label={isSending ? "Stop response" : "Send message"}
                 >
                   {isSending ? <X className="h-5 w-5" /> : <ArrowUp className="h-5 w-5" />}
                 </button>

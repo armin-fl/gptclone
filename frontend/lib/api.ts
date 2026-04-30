@@ -2,6 +2,7 @@ import type {
   ApiError,
   AuthTokenResponse,
   AuthUser,
+  ChatStreamEvent,
   Conversation,
   ConversationDetail,
   OTPRequestResponse,
@@ -46,6 +47,14 @@ function formatApiError(status: number, payload: ApiError | null): string {
   return `Request failed with status ${status}`;
 }
 
+async function readErrorPayload(response: Response): Promise<ApiError | null> {
+  try {
+    return (await response.json()) as ApiError;
+  } catch {
+    return null;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit, accessToken?: string): Promise<T> {
   const isFormData = init?.body instanceof FormData;
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -59,12 +68,7 @@ async function request<T>(path: string, init?: RequestInit, accessToken?: string
   });
 
   if (!response.ok) {
-    let payload: ApiError | null = null;
-    try {
-      payload = (await response.json()) as ApiError;
-    } catch {
-      payload = null;
-    }
+    const payload = await readErrorPayload(response);
     throw new HttpError(response.status, payload);
   }
 
@@ -169,4 +173,77 @@ export function sendMessage(
     method: "POST",
     body: JSON.stringify(payload),
   }, accessToken);
+}
+
+export async function streamMessage(
+  conversationId: string,
+  accessToken: string,
+  payload: {
+    content: string;
+    model?: string;
+    system_instruction?: string;
+  },
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/messages/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ ...payload, stream: true }),
+    cache: "no-store",
+    signal,
+  });
+
+  if (!response.ok) {
+    const payload = await readErrorPayload(response);
+    throw new HttpError(response.status, payload);
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming response is not available in this browser.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  async function emitLine(line: string) {
+    const clean = line.trim();
+    if (!clean) {
+      return;
+    }
+
+    let event: ChatStreamEvent;
+    try {
+      event = JSON.parse(clean) as ChatStreamEvent;
+    } catch {
+      throw new Error("Received malformed streaming response.");
+    }
+
+    onEvent(event);
+    if (event.type === "error") {
+      throw new Error(event.error || event.detail);
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      await emitLine(line);
+    }
+  }
+
+  buffer += decoder.decode();
+  await emitLine(buffer);
 }

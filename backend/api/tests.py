@@ -1,3 +1,4 @@
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -8,7 +9,7 @@ from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import User
-from api.models import Conversation
+from api.models import Conversation, Message
 from .services import (
     UnsupportedVllmModelError,
     _build_vllm_client,
@@ -16,6 +17,7 @@ from .services import (
     get_available_vllm_models,
     get_vllm_base_url,
     request_vllm_chat,
+    stream_vllm_chat,
 )
 
 
@@ -125,12 +127,50 @@ class VllmServiceTests(SimpleTestCase):
             },
         )
 
+    @patch("api.services.propagate_attributes")
+    @patch("api.services._build_vllm_client")
+    def test_stream_vllm_chat_yields_assistant_deltas(
+        self,
+        mock_build_client,
+        mock_propagate_attributes,
+    ):
+        mock_client = mock_build_client.return_value
+        mock_client.chat.completions.create.return_value = [
+            _FakeStreamChunk("Hello"),
+            _FakeStreamChunk(None),
+            _FakeStreamChunk(" from vLLM"),
+        ]
+        mock_propagate_attributes.return_value = nullcontext()
+
+        chunks = list(
+            stream_vllm_chat(
+                model="gpt-oss-20b",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+        )
+
+        self.assertEqual(chunks, ["Hello", " from vLLM"])
+        mock_client.chat.completions.create.assert_called_once_with(
+            model="gpt-oss-20b",
+            messages=[{"role": "user", "content": "Hello"}],
+            stream=True,
+        )
+
 
 class _FakeCompletion:
     def __init__(self, content):
         self.choices = [
             SimpleNamespace(
                 message=SimpleNamespace(content=content),
+            )
+        ]
+
+
+class _FakeStreamChunk:
+    def __init__(self, content):
+        self.choices = [
+            SimpleNamespace(
+                delta=SimpleNamespace(content=content),
             )
         ]
 
@@ -211,3 +251,33 @@ class ConversationAuthorizationTests(TestCase):
         self.assertEqual(delete_response.status_code, 404)
         conversation.refresh_from_db()
         self.assertEqual(conversation.title, "Private")
+
+    @patch("api.views.stream_vllm_chat")
+    def test_streaming_message_returns_deltas_and_persists_assistant(self, mock_stream_vllm_chat):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user)
+        mock_stream_vllm_chat.return_value = ["Hello", " stream"]
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/",
+            {"content": "Hi", "stream": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/x-ndjson")
+
+        body = b"".join(response.streaming_content).decode("utf-8")
+        events = [json.loads(line) for line in body.splitlines()]
+
+        self.assertEqual([event["type"] for event in events], ["conversation", "delta", "delta", "done"])
+        self.assertEqual(events[1]["delta"], "Hello")
+        self.assertEqual(events[2]["delta"], " stream")
+        self.assertEqual(events[3]["conversation"]["messages"][-1]["content"], "Hello stream")
+        self.assertTrue(
+            Message.objects.filter(
+                conversation=conversation,
+                role=Message.Role.ASSISTANT,
+                content="Hello stream",
+            ).exists()
+        )

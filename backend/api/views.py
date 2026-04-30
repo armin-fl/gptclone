@@ -1,6 +1,9 @@
+import json
+
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Prefetch
+from django.http import StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -20,6 +23,7 @@ from .services import (
     build_history_as_system_message,
     get_available_vllm_models,
     request_vllm_chat,
+    stream_vllm_chat,
 )
 
 
@@ -29,6 +33,10 @@ def _build_title_from_user_message(content: str) -> str:
     if len(title) > 60:
         title = f"{title[:57]}..."
     return title or Conversation.DEFAULT_TITLE
+
+
+def _stream_event(event: dict) -> bytes:
+    return f"{json.dumps(event)}\n".encode("utf-8")
 
 
 class ConversationListCreateView(APIView):
@@ -106,6 +114,119 @@ class ConversationDetailView(APIView):
 class ConversationSendMessageView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def _serialize_conversation(self, conversation_id, model: str) -> dict:
+        refreshed = (
+            Conversation.objects.select_related("user")
+            .prefetch_related("messages")
+            .get(id=conversation_id)
+        )
+        response_data = ConversationDetailSerializer(refreshed).data
+        response_data["active_model"] = model
+        return response_data
+
+    def _save_assistant_reply(self, conversation_id, assistant_reply: str, model: str) -> dict | None:
+        clean_reply = assistant_reply.strip()
+        if not clean_reply:
+            return None
+
+        with transaction.atomic():
+            conversation = Conversation.objects.select_for_update().get(id=conversation_id)
+            Message.objects.create(
+                conversation=conversation,
+                role=Message.Role.ASSISTANT,
+                content=clean_reply,
+            )
+
+            if conversation.title == Conversation.DEFAULT_TITLE:
+                first_user_message = (
+                    Message.objects.filter(conversation=conversation, role=Message.Role.USER)
+                    .order_by("created_at")
+                    .first()
+                )
+                if first_user_message:
+                    conversation.title = _build_title_from_user_message(first_user_message.content)
+            conversation.updated_at = timezone.now()
+            conversation.save(update_fields=["title", "updated_at"])
+
+        return self._serialize_conversation(conversation_id, model)
+
+    def _stream_assistant_events(
+        self,
+        *,
+        conversation_id,
+        model: str,
+        llm_messages: list[dict[str, str]],
+        langfuse_user_id: str | None,
+        langfuse_metadata: dict,
+    ):
+        chunks: list[str] = []
+        yield _stream_event(
+            {
+                "type": "conversation",
+                "conversation": self._serialize_conversation(conversation_id, model),
+            }
+        )
+
+        try:
+            for delta in stream_vllm_chat(
+                model=model,
+                messages=llm_messages,
+                langfuse_session_id=str(conversation_id),
+                langfuse_user_id=langfuse_user_id,
+                langfuse_metadata=langfuse_metadata,
+            ):
+                chunks.append(delta)
+                yield _stream_event({"type": "delta", "delta": delta})
+        except GeneratorExit:
+            self._save_assistant_reply(conversation_id, "".join(chunks), model)
+            raise
+        except (UnsupportedVllmModelError, RuntimeError) as exc:
+            self._save_assistant_reply(conversation_id, "".join(chunks), model)
+            yield _stream_event(
+                {
+                    "type": "error",
+                    "detail": "Failed to get response from vLLM.",
+                    "error": str(exc),
+                }
+            )
+            return
+
+        response_data = self._save_assistant_reply(conversation_id, "".join(chunks), model)
+        if response_data is None:
+            yield _stream_event(
+                {
+                    "type": "error",
+                    "detail": "Failed to get response from vLLM.",
+                    "error": "vLLM returned an empty assistant message.",
+                }
+            )
+            return
+
+        yield _stream_event({"type": "done", "conversation": response_data})
+
+    def _streaming_response(
+        self,
+        *,
+        conversation_id,
+        model: str,
+        llm_messages: list[dict[str, str]],
+        langfuse_user_id: str | None,
+        langfuse_metadata: dict,
+    ) -> StreamingHttpResponse:
+        response = StreamingHttpResponse(
+            self._stream_assistant_events(
+                conversation_id=conversation_id,
+                model=model,
+                llm_messages=llm_messages,
+                langfuse_user_id=langfuse_user_id,
+                langfuse_metadata=langfuse_metadata,
+            ),
+            content_type="application/x-ndjson",
+        )
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
+
     # Flow 1: request entry; validates input, calls services, saves messages, and returns the conversation.
     def post(self, request, conversation_id):
         serializer = SendMessageSerializer(data=request.data)
@@ -136,6 +257,7 @@ class ConversationSendMessageView(APIView):
             serializer.validated_data.get("system_instruction")
             or "You are a helpful AI assistant. Keep answers clear and concise unless asked otherwise."
         )
+        wants_stream = serializer.validated_data.get("stream", False)
 
         with transaction.atomic():
             # Flow 3: store the USER message first so later history and response include this request.
@@ -145,7 +267,11 @@ class ConversationSendMessageView(APIView):
                 content=content,
             )
 
-            previous_messages = conversation.messages.exclude(id=user_message.id)
+            previous_messages = (
+                Message.objects.filter(conversation=conversation)
+                .exclude(id=user_message.id)
+                .order_by("created_at")
+            )
             # Flow 4: build_history_as_system_message() turns older messages into vLLM context.
             history_system_message = build_history_as_system_message(previous_messages)
 
@@ -159,6 +285,19 @@ class ConversationSendMessageView(APIView):
                     "content": user_message.content,
                 },
             ]
+            langfuse_metadata = {
+                "conversation_id": str(conversation.id),
+                "message_id": user_message.id,
+            }
+
+            if wants_stream:
+                return self._streaming_response(
+                    conversation_id=conversation.id,
+                    model=model,
+                    llm_messages=llm_messages,
+                    langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
+                    langfuse_metadata=langfuse_metadata,
+                )
 
             try:
                 # Flow 5: request_vllm_chat() sends the prepared messages to vLLM and returns assistant text.
@@ -167,10 +306,7 @@ class ConversationSendMessageView(APIView):
                     messages=llm_messages,
                     langfuse_session_id=str(conversation.id),
                     langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
-                    langfuse_metadata={
-                        "conversation_id": str(conversation.id),
-                        "message_id": user_message.id,
-                    },
+                    langfuse_metadata=langfuse_metadata,
                 )
             except UnsupportedVllmModelError as exc:
                 transaction.set_rollback(True)
@@ -204,7 +340,4 @@ class ConversationSendMessageView(APIView):
             conversation.save(update_fields=["title", "updated_at"])
 
         # Flow 8: reload and serialize the full conversation as the HTTP response back to the client.
-        refreshed = Conversation.objects.select_related("user").prefetch_related("messages").get(id=conversation.id)
-        response_data = ConversationDetailSerializer(refreshed).data
-        response_data["active_model"] = model
-        return Response(response_data)
+        return Response(self._serialize_conversation(conversation.id, model))

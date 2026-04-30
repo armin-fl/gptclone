@@ -78,6 +78,7 @@ class SendMessageSerializer(serializers.Serializer):
     content = serializers.CharField()
     model = serializers.CharField(max_length=100, required=False, allow_blank=True)
     system_instruction = serializers.CharField(required=False, allow_blank=True)
+    stream = serializers.BooleanField(required=False, default=False)
 
     def validate_content(self, value: str) -> str:
         clean = value.strip()
