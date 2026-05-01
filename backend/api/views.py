@@ -2,7 +2,6 @@ import json
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -11,12 +10,20 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Conversation, Message
+from .cache import bump_conversation_cache, bump_user_conversations
+from .conversation_data import (
+    latest_prompt_messages,
+    save_conversation_summary,
+    serialize_conversation_detail,
+    serialize_conversation_summary,
+    get_conversation_page,
+)
+from .pagination import CursorError
 from .serializers import (
     ConversationCreateSerializer,
-    ConversationDetailSerializer,
-    ConversationListSerializer,
     ConversationUpdateSerializer,
     EditMessageSerializer,
+    MessageSerializer,
     RegenerateMessageSerializer,
     SendMessageSerializer,
 )
@@ -54,32 +61,34 @@ class ConversationListCreateView(APIView):
 
     # List flow: GET /conversations/ returns conversations and previews; separate from the send-message path.
     def get(self, request):
-        qs = (
-            Conversation.objects.filter(user=request.user)
-            .select_related("user")
-            .prefetch_related(Prefetch("messages", queryset=Message.objects.only("content", "created_at")))
-        )
-
-        serializer = ConversationListSerializer(qs, many=True)
-        return Response(serializer.data)
+        try:
+            return Response(
+                get_conversation_page(
+                    request.user,
+                    cursor=request.query_params.get("cursor"),
+                    limit=request.query_params.get("limit"),
+                    query=request.query_params.get("q"),
+                )
+            )
+        except CursorError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
     # Create flow: POST /conversations/ creates the conversation_id used by ConversationSendMessageView.post().
     def post(self, request):
         serializer = ConversationCreateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         conversation = serializer.save()
-        output = ConversationDetailSerializer(conversation)
-        return Response(output.data, status=status.HTTP_201_CREATED)
+        save_conversation_summary(conversation)
+        bump_user_conversations(request.user.id)
+        output = serialize_conversation_detail(conversation)
+        return Response(output, status=status.HTTP_201_CREATED)
 
 
 class ConversationDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _get_conversation(self, request, conversation_id, *, include_messages: bool = True):
-        qs = Conversation.objects.select_related("user").filter(id=conversation_id, user=request.user)
-        if include_messages:
-            qs = qs.prefetch_related("messages")
-        return qs.first()
+        return Conversation.objects.filter(id=conversation_id, user=request.user).first()
 
     # Detail flow: GET /conversations/<id>/ returns messages, same shape as the send-message response.
     def get(self, request, conversation_id):
@@ -87,8 +96,16 @@ class ConversationDetailView(APIView):
         if not conversation:
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = ConversationDetailSerializer(conversation)
-        return Response(serializer.data)
+        try:
+            return Response(
+                serialize_conversation_detail(
+                    conversation,
+                    before=request.query_params.get("before"),
+                    limit=request.query_params.get("limit"),
+                )
+            )
+        except CursorError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request, conversation_id):
         conversation = self._get_conversation(request, conversation_id, include_messages=False)
@@ -109,8 +126,9 @@ class ConversationDetailView(APIView):
         conversation.updated_at = timezone.now()
         update_fields.append("updated_at")
         conversation.save(update_fields=update_fields)
+        bump_user_conversations(request.user.id)
 
-        return Response(ConversationDetailSerializer(conversation).data)
+        return Response(serialize_conversation_detail(conversation))
 
     def delete(self, request, conversation_id):
         conversation = self._get_conversation(request, conversation_id, include_messages=False)
@@ -118,6 +136,7 @@ class ConversationDetailView(APIView):
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
         conversation.delete()
+        bump_user_conversations(request.user.id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -125,12 +144,8 @@ class ConversationSendMessageView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _serialize_conversation(self, conversation_id, model: str) -> dict:
-        refreshed = (
-            Conversation.objects.select_related("user")
-            .prefetch_related("messages")
-            .get(id=conversation_id)
-        )
-        response_data = ConversationDetailSerializer(refreshed).data
+        refreshed = Conversation.objects.get(id=conversation_id)
+        response_data = serialize_conversation_detail(refreshed)
         response_data["active_model"] = model
         return response_data
 
@@ -141,7 +156,7 @@ class ConversationSendMessageView(APIView):
 
         with transaction.atomic():
             conversation = Conversation.objects.select_for_update().get(id=conversation_id)
-            Message.objects.create(
+            assistant_message = Message.objects.create(
                 conversation=conversation,
                 role=Message.Role.ASSISTANT,
                 content=clean_reply,
@@ -156,9 +171,14 @@ class ConversationSendMessageView(APIView):
                 if first_user_message:
                     conversation.title = _build_title_from_user_message(first_user_message.content)
             conversation.updated_at = timezone.now()
-            conversation.save(update_fields=["title", "updated_at"])
+            save_conversation_summary(conversation, update_fields=["title", "updated_at"])
 
-        return self._serialize_conversation(conversation_id, model)
+        bump_conversation_cache(conversation_id=str(conversation_id), user_id=conversation.user_id)
+        return {
+            "message": MessageSerializer(assistant_message).data,
+            "conversation": serialize_conversation_summary(conversation),
+            "active_model": model,
+        }
 
     def _stream_assistant_events(
         self,
@@ -168,14 +188,11 @@ class ConversationSendMessageView(APIView):
         llm_messages: list[dict[str, str]],
         langfuse_user_id: str | None,
         langfuse_metadata: dict,
+        initial_event: dict | None = None,
     ):
         chunks: list[str] = []
-        yield _stream_event(
-            {
-                "type": "conversation",
-                "conversation": self._serialize_conversation(conversation_id, model),
-            }
-        )
+        if initial_event is not None:
+            yield _stream_event(initial_event)
 
         try:
             for delta in stream_vllm_chat(
@@ -201,8 +218,8 @@ class ConversationSendMessageView(APIView):
             )
             return
 
-        response_data = self._save_assistant_reply(conversation_id, "".join(chunks), model)
-        if response_data is None:
+        saved_reply = self._save_assistant_reply(conversation_id, "".join(chunks), model)
+        if saved_reply is None:
             yield _stream_event(
                 {
                     "type": "error",
@@ -212,7 +229,7 @@ class ConversationSendMessageView(APIView):
             )
             return
 
-        yield _stream_event({"type": "done", "conversation": response_data})
+        yield _stream_event({"type": "done", **saved_reply})
 
     def _streaming_response(
         self,
@@ -222,6 +239,7 @@ class ConversationSendMessageView(APIView):
         llm_messages: list[dict[str, str]],
         langfuse_user_id: str | None,
         langfuse_metadata: dict,
+        initial_event: dict | None = None,
     ) -> StreamingHttpResponse:
         response = StreamingHttpResponse(
             self._stream_assistant_events(
@@ -230,6 +248,7 @@ class ConversationSendMessageView(APIView):
                 llm_messages=llm_messages,
                 langfuse_user_id=langfuse_user_id,
                 langfuse_metadata=langfuse_metadata,
+                initial_event=initial_event,
             ),
             content_type="application/x-ndjson",
         )
@@ -243,9 +262,7 @@ class ConversationSendMessageView(APIView):
         serializer.is_valid(raise_exception=True)
 
         conversation = (
-            Conversation.objects.select_related("user")
-            .prefetch_related("messages")
-            .filter(id=conversation_id, user=request.user)
+            Conversation.objects.filter(id=conversation_id, user=request.user)
             .first()
         )
         if not conversation:
@@ -277,11 +294,7 @@ class ConversationSendMessageView(APIView):
                 content=content,
             )
 
-            previous_messages = (
-                Message.objects.filter(conversation=conversation)
-                .exclude(id=user_message.id)
-                .order_by("created_at")
-            )
+            previous_messages = latest_prompt_messages(conversation, exclude_message_id=user_message.id)
             # Flow 4: build_history_as_system_message() turns older messages into vLLM context.
             history_system_message = build_history_as_system_message(previous_messages)
 
@@ -301,12 +314,22 @@ class ConversationSendMessageView(APIView):
             }
 
             if wants_stream:
+                if conversation.title == Conversation.DEFAULT_TITLE:
+                    conversation.title = _build_title_from_user_message(user_message.content)
+                conversation.updated_at = timezone.now()
+                save_conversation_summary(conversation, update_fields=["title", "updated_at"])
+                bump_conversation_cache(conversation_id=str(conversation.id), user_id=conversation.user_id)
                 return self._streaming_response(
                     conversation_id=conversation.id,
                     model=model,
                     llm_messages=llm_messages,
                     langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
+                    initial_event={
+                        "type": "message",
+                        "message": MessageSerializer(user_message).data,
+                        "conversation": serialize_conversation_summary(conversation),
+                    },
                 )
 
             try:
@@ -347,7 +370,8 @@ class ConversationSendMessageView(APIView):
             if conversation.title == Conversation.DEFAULT_TITLE:
                 conversation.title = _build_title_from_user_message(user_message.content)
             conversation.updated_at = timezone.now()
-            conversation.save(update_fields=["title", "updated_at"])
+            save_conversation_summary(conversation, update_fields=["title", "updated_at"])
+            bump_conversation_cache(conversation_id=str(conversation.id), user_id=conversation.user_id)
 
         # Flow 8: reload and serialize the full conversation as the HTTP response back to the client.
         return Response(self._serialize_conversation(conversation.id, model))
@@ -361,8 +385,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
         serializer.is_valid(raise_exception=True)
 
         conversation = (
-            Conversation.objects.select_related("user")
-            .filter(id=conversation_id, user=request.user)
+            Conversation.objects.filter(id=conversation_id, user=request.user)
             .first()
         )
         if not conversation:
@@ -449,7 +472,11 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
 
             target_message.delete()
             locked_conversation.updated_at = timezone.now()
-            locked_conversation.save(update_fields=["updated_at"])
+            save_conversation_summary(locked_conversation, update_fields=["updated_at"])
+            bump_conversation_cache(
+                conversation_id=str(locked_conversation.id),
+                user_id=locked_conversation.user_id,
+            )
 
             if wants_stream:
                 return self._streaming_response(
@@ -458,6 +485,10 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                     llm_messages=llm_messages,
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
+                    initial_event={
+                        "type": "sync",
+                        "conversation": serialize_conversation_detail(locked_conversation),
+                    },
                 )
 
             try:
@@ -493,7 +524,11 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                 content=assistant_reply,
             )
             locked_conversation.updated_at = timezone.now()
-            locked_conversation.save(update_fields=["updated_at"])
+            save_conversation_summary(locked_conversation, update_fields=["updated_at"])
+            bump_conversation_cache(
+                conversation_id=str(locked_conversation.id),
+                user_id=locked_conversation.user_id,
+            )
 
         return Response(self._serialize_conversation(conversation.id, model))
 
@@ -503,8 +538,7 @@ class ConversationForkMessageView(APIView):
 
     def post(self, request, conversation_id, message_id):
         conversation = (
-            Conversation.objects.select_related("user")
-            .filter(id=conversation_id, user=request.user)
+            Conversation.objects.filter(id=conversation_id, user=request.user)
             .first()
         )
         if not conversation:
@@ -540,13 +574,10 @@ class ConversationForkMessageView(APIView):
                     for message in messages_to_copy
                 ]
             )
+            save_conversation_summary(forked_conversation)
 
-        refreshed = (
-            Conversation.objects.select_related("user")
-            .prefetch_related("messages")
-            .get(id=forked_conversation.id)
-        )
-        return Response(ConversationDetailSerializer(refreshed).data, status=status.HTTP_201_CREATED)
+        bump_conversation_cache(conversation_id=str(forked_conversation.id), user_id=request.user.id)
+        return Response(serialize_conversation_detail(forked_conversation), status=status.HTTP_201_CREATED)
 
 
 class ConversationEditMessageView(ConversationSendMessageView):
@@ -557,8 +588,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
         serializer.is_valid(raise_exception=True)
 
         conversation = (
-            Conversation.objects.select_related("user")
-            .filter(id=conversation_id, user=request.user)
+            Conversation.objects.filter(id=conversation_id, user=request.user)
             .first()
         )
         if not conversation:
@@ -630,7 +660,11 @@ class ConversationEditMessageView(ConversationSendMessageView):
             else:
                 update_fields = ["updated_at"]
             locked_conversation.updated_at = timezone.now()
-            locked_conversation.save(update_fields=update_fields)
+            save_conversation_summary(locked_conversation, update_fields=update_fields)
+            bump_conversation_cache(
+                conversation_id=str(locked_conversation.id),
+                user_id=locked_conversation.user_id,
+            )
 
             if wants_stream:
                 return self._streaming_response(
@@ -639,6 +673,10 @@ class ConversationEditMessageView(ConversationSendMessageView):
                     llm_messages=llm_messages,
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
+                    initial_event={
+                        "type": "sync",
+                        "conversation": serialize_conversation_detail(locked_conversation),
+                    },
                 )
 
             try:
@@ -674,6 +712,10 @@ class ConversationEditMessageView(ConversationSendMessageView):
                 content=assistant_reply,
             )
             locked_conversation.updated_at = timezone.now()
-            locked_conversation.save(update_fields=["updated_at"])
+            save_conversation_summary(locked_conversation, update_fields=["updated_at"])
+            bump_conversation_cache(
+                conversation_id=str(locked_conversation.id),
+                user_id=locked_conversation.user_id,
+            )
 
         return Response(self._serialize_conversation(conversation.id, model))

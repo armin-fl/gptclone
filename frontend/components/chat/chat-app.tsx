@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
   Bot,
@@ -41,11 +42,13 @@ import {
   forkConversationFromMessage,
   getConversation,
   getMe,
+  getSession,
   HttpError,
   listConversations,
   refreshAuthToken,
   requestPhoneChangeOtp,
   requestOtp,
+  signOut,
   streamEditMessage,
   streamRegenerateMessage,
   streamMessage,
@@ -54,7 +57,7 @@ import {
   verifyPhoneChangeOtp,
   verifyOtp,
 } from "@/lib/api";
-import type { AuthUser, ChatMessage, Conversation, ConversationDetail } from "@/lib/types";
+import type { AuthUser, ChatMessage, Conversation, ConversationDetail, ConversationPage, InitialChatData } from "@/lib/types";
 import { ChatMessageRenderer } from "@/components/chat/chat-message-renderer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -64,8 +67,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 const PHONE_STORAGE_KEY = "chat_phone_number";
-const ACCESS_TOKEN_STORAGE_KEY = "chat_access_token";
-const REFRESH_TOKEN_STORAGE_KEY = "chat_refresh_token";
+const LEGACY_ACCESS_TOKEN_STORAGE_KEY = "chat_access_token";
+const LEGACY_REFRESH_TOKEN_STORAGE_KEY = "chat_refresh_token";
 const THEME_STORAGE_KEY = "chat_theme";
 const SYSTEM_INSTRUCTION_STORAGE_KEY = "chat_system_instruction";
 const EDIT_WARNING_DISABLED_STORAGE_KEY = "chat_edit_warning_disabled";
@@ -82,8 +85,7 @@ type AuthMode = "login" | "register";
 type AccountTab = "profile" | "personalization";
 
 interface AuthSession {
-  access: string;
-  refresh: string;
+  authenticated: true;
 }
 
 const MODEL_OPTIONS = [
@@ -256,14 +258,39 @@ function toConversationSummary(conversation: ConversationDetail): Conversation {
   return {
     id: conversation.id,
     title: conversation.title,
-    user_phone_number: conversation.user_phone_number,
     is_pinned: conversation.is_pinned,
     created_at: conversation.created_at,
     updated_at: conversation.updated_at,
+    message_count: conversation.message_count,
+    last_message_at: conversation.last_message_at,
     last_message_preview: lastMessage
       ? getMessagePreview(lastMessage.content)
       : conversation.last_message_preview ?? "",
   };
+}
+
+function mergeConversationSummary(
+  detail: ConversationDetail,
+  summary: Conversation,
+): ConversationDetail {
+  return {
+    ...detail,
+    ...summary,
+    messages: detail.messages,
+    next_before: detail.next_before,
+  };
+}
+
+function replaceMessageById(messages: ChatMessage[], messageId: number, nextMessage: ChatMessage) {
+  let didReplace = false;
+  const nextMessages = messages.map((message) => {
+    if (message.id !== messageId) {
+      return message;
+    }
+    didReplace = true;
+    return nextMessage;
+  });
+  return didReplace ? nextMessages : [...nextMessages, nextMessage];
 }
 
 function isAbortError(error: unknown): boolean {
@@ -318,20 +345,31 @@ async function copyTextToClipboard(text: string): Promise<void> {
   }
 }
 
-export function ChatApp() {
-  const [phoneNumber, setPhoneNumber] = useState("");
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
-  const [phoneInput, setPhoneInput] = useState(PHONE_PREFIX);
-  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+interface ChatAppProps {
+  initialData?: InitialChatData;
+}
+
+export function ChatApp({ initialData }: ChatAppProps = {}) {
+  const queryClient = useQueryClient();
+  const [phoneNumber, setPhoneNumber] = useState(initialData?.user?.phone_number ?? "");
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(initialData?.user ?? null);
+  const [phoneInput, setPhoneInput] = useState(initialData?.user?.phone_number ?? PHONE_PREFIX);
+  const [authSession, setAuthSession] = useState<AuthSession | null>(
+    initialData?.user ? { authenticated: true } : null,
+  );
   const [theme, setTheme] = useState<Theme>("dark");
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [otpInput, setOtpInput] = useState("");
   const [devOtp, setDevOtp] = useState("");
   const [isOtpRequested, setIsOtpRequested] = useState(false);
   const [isPhoneInputFocused, setIsPhoneInputFocused] = useState(false);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConversation, setActiveConversation] = useState<ConversationDetail | null>(null);
-  const [isComposingNewChat, setIsComposingNewChat] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>(initialData?.conversations.results ?? []);
+  const [activeConversation, setActiveConversation] = useState<ConversationDetail | null>(
+    initialData?.activeConversation ?? null,
+  );
+  const [isComposingNewChat, setIsComposingNewChat] = useState(
+    Boolean(initialData?.user && !initialData.activeConversation && !initialData.conversations.results.length),
+  );
   const [searchQuery, setSearchQuery] = useState("");
   const [draft, setDraft] = useState("");
   const [systemInstruction, setSystemInstruction] = useState(DEFAULT_SYSTEM_INSTRUCTION);
@@ -349,14 +387,14 @@ export function ChatApp() {
   const [isSidebarProfileMenuOpen, setIsSidebarProfileMenuOpen] = useState(false);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [accountTab, setAccountTab] = useState<AccountTab>("profile");
-  const [profileFirstName, setProfileFirstName] = useState("");
-  const [profileLastName, setProfileLastName] = useState("");
+  const [profileFirstName, setProfileFirstName] = useState(initialData?.user?.first_name ?? "");
+  const [profileLastName, setProfileLastName] = useState(initialData?.user?.last_name ?? "");
   const [profileImageFile, setProfileImageFile] = useState<File | null>(null);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  const [changePhoneInput, setChangePhoneInput] = useState(PHONE_PREFIX);
+  const [changePhoneInput, setChangePhoneInput] = useState(initialData?.user?.phone_number ?? PHONE_PREFIX);
   const [changePhoneOtpInput, setChangePhoneOtpInput] = useState("");
   const [changePhoneDevOtp, setChangePhoneDevOtp] = useState("");
   const [isPhoneChangeOtpRequested, setIsPhoneChangeOtpRequested] = useState(false);
@@ -391,10 +429,11 @@ export function ChatApp() {
   const hasScrolledForCurrentResponseRef = useRef(false);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
   const isSendingRef = useRef(false);
+  const didUseInitialDataRef = useRef(Boolean(initialData?.user));
 
   const isDark = theme === "dark";
   const activeConversationId = activeConversation?.id;
-  const accessToken = authSession?.access ?? "";
+  const isAuthenticated = Boolean(authSession);
   const activeModel = MODEL_OPTIONS.find((model) => model.id === selectedModel) ?? MODEL_OPTIONS[0];
   const profileDisplayName = getDisplayName(currentUser, phoneNumber);
   const profileImageUrl = currentUser?.profile_image_url || "";
@@ -520,11 +559,10 @@ export function ChatApp() {
 
   const persistAuthSession = useCallback((nextSession: AuthSession) => {
     setAuthSession(nextSession);
-    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, nextSession.access);
-    window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, nextSession.refresh);
   }, []);
 
   const clearAuthSession = useCallback(() => {
+    void signOut().catch(() => undefined);
     setAuthSession(null);
     setCurrentUser(null);
     setConversations([]);
@@ -532,11 +570,12 @@ export function ChatApp() {
     setIsComposingNewChat(false);
     setDraft("");
     setCurrentConversationUrl(null);
-    window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-    window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_ACCESS_TOKEN_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_REFRESH_TOKEN_STORAGE_KEY);
   }, []);
 
   const applyConversationUpdate = useCallback((updated: ConversationDetail) => {
+    queryClient.setQueryData(["conversation", updated.id], updated);
     setConversations((prev) =>
       prev.map((conversation) =>
         conversation.id === updated.id
@@ -559,13 +598,12 @@ export function ChatApp() {
           }
         : prev,
     );
-  }, []);
+  }, [queryClient]);
 
   useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
+    let isCancelled = false;
+    const timeoutId = window.setTimeout(async () => {
       const storedPhoneNumber = getStoredPhoneNumber(window.localStorage.getItem(PHONE_STORAGE_KEY));
-      const access = window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-      const refresh = window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
       const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
       const storedSystemInstruction = window.localStorage.getItem(SYSTEM_INSTRUCTION_STORAGE_KEY);
       const storedEditWarningDisabled = window.localStorage.getItem(EDIT_WARNING_DISABLED_STORAGE_KEY);
@@ -573,10 +611,6 @@ export function ChatApp() {
       if (storedPhoneNumber) {
         setPhoneNumber(storedPhoneNumber);
         setPhoneInput(storedPhoneNumber);
-      }
-
-      if (access && refresh) {
-        setAuthSession({ access, refresh });
       }
 
       if (storedTheme === "dark" || storedTheme === "light") {
@@ -590,32 +624,63 @@ export function ChatApp() {
       if (storedEditWarningDisabled === "true") {
         setSuppressEditWarning(true);
       }
+
+      try {
+        const session = await getSession();
+        if (isCancelled || !session.user) {
+          return;
+        }
+        persistAuthSession({ authenticated: true });
+        setCurrentUser(session.user);
+        setPhoneNumber(session.user.phone_number);
+        setPhoneInput(session.user.phone_number);
+        setChangePhoneInput(session.user.phone_number);
+        setProfileFirstName(session.user.first_name);
+        setProfileLastName(session.user.last_name);
+        window.localStorage.setItem(PHONE_STORAGE_KEY, session.user.phone_number);
+      } catch {
+        if (!isCancelled) {
+          setAuthSession(null);
+        }
+      }
     }, 0);
 
-    return () => window.clearTimeout(timeoutId);
-  }, []);
+    return () => {
+      isCancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [persistAuthSession]);
+
+  useEffect(() => {
+    if (!initialData?.user) {
+      return;
+    }
+    queryClient.setQueryData<ConversationPage>(["conversations", ""], initialData.conversations);
+    if (initialData.activeConversation) {
+      queryClient.setQueryData(
+        ["conversation", initialData.activeConversation.id],
+        initialData.activeConversation,
+      );
+    }
+  }, [initialData, queryClient]);
 
   const performAuthenticated = useCallback(
-    async <T,>(operation: (access: string) => Promise<T>): Promise<T> => {
+    async <T,>(operation: () => Promise<T>): Promise<T> => {
       if (!authSession) {
         throw new Error("Sign in first.");
       }
 
       try {
-        return await operation(authSession.access);
+        return await operation();
       } catch (err) {
         if (!(err instanceof HttpError) || err.status !== 401) {
           throw err;
         }
 
         try {
-          const refreshed = await refreshAuthToken(authSession.refresh);
-          const nextSession = {
-            access: refreshed.access,
-            refresh: refreshed.refresh ?? authSession.refresh,
-          };
-          persistAuthSession(nextSession);
-          return await operation(nextSession.access);
+          await refreshAuthToken();
+          persistAuthSession({ authenticated: true });
+          return await operation();
         } catch (refreshErr) {
           clearAuthSession();
           throw refreshErr;
@@ -633,7 +698,7 @@ export function ChatApp() {
     let isCancelled = false;
     const timeoutId = window.setTimeout(async () => {
       try {
-        const user = await performAuthenticated((access) => getMe(access));
+        const user = await performAuthenticated(() => getMe());
         if (isCancelled) {
           return;
         }
@@ -808,17 +873,23 @@ export function ChatApp() {
     if (!authSession || isSendingRef.current) {
       return;
     }
+    if (didUseInitialDataRef.current) {
+      didUseInitialDataRef.current = false;
+      return;
+    }
 
     let isCancelled = false;
     const timeoutId = window.setTimeout(async () => {
       setIsLoadingConversations(true);
       setError(null);
       try {
-        const items = await performAuthenticated((access) => listConversations(access));
+        const page = await performAuthenticated(() => listConversations({ q: searchQuery }));
+        const items = page.results;
         if (isCancelled) {
           return;
         }
 
+        queryClient.setQueryData<ConversationPage>(["conversations", searchQuery.trim()], page);
         setConversations(items);
 
         if (!items.length) {
@@ -837,8 +908,9 @@ export function ChatApp() {
           (linkedConversationId && items.find((item) => item.id === linkedConversationId)?.id) ||
           items.find((item) => item.id === activeConversationId)?.id ||
           items[0].id;
-        const detail = await performAuthenticated((access) => getConversation(targetId, access));
+        const detail = await performAuthenticated(() => getConversation(targetId));
         if (!isCancelled) {
+          queryClient.setQueryData(["conversation", targetId], detail);
           setActiveConversation(detail);
           setCurrentConversationUrl(detail.id);
           scrollToLatest("auto");
@@ -863,6 +935,8 @@ export function ChatApp() {
     activeConversationId,
     isComposingNewChat,
     performAuthenticated,
+    queryClient,
+    searchQuery,
     scrollToLatest,
   ]);
 
@@ -927,7 +1001,7 @@ export function ChatApp() {
 
   async function handleSaveProfile(event: React.FormEvent) {
     event.preventDefault();
-    if (!accessToken || isSavingProfile) {
+    if (!isAuthenticated || isSavingProfile) {
       return;
     }
 
@@ -943,7 +1017,7 @@ export function ChatApp() {
     setProfileMessage(null);
 
     try {
-      const user = await performAuthenticated((access) => updateMe(access, payload));
+      const user = await performAuthenticated(() => updateMe(payload));
       setCurrentUser(user);
       setPhoneNumber(user.phone_number);
       setProfileFirstName(user.first_name);
@@ -961,7 +1035,7 @@ export function ChatApp() {
   async function handleRequestPhoneChangeOtp(event: React.FormEvent) {
     event.preventDefault();
     const clean = getSubmitPhoneNumber(changePhoneInput);
-    if (!accessToken || isRequestingPhoneOtp) {
+    if (!isAuthenticated || isRequestingPhoneOtp) {
       return;
     }
 
@@ -982,7 +1056,7 @@ export function ChatApp() {
     setChangePhoneOtpInput("");
 
     try {
-      const result = await performAuthenticated((access) => requestPhoneChangeOtp(access, clean));
+      const result = await performAuthenticated(() => requestPhoneChangeOtp(clean));
       setChangePhoneInput(clean);
       setChangePhoneDevOtp(result.otp_code ?? "");
       setChangePhoneOtpInput(result.otp_code ? normalizeOtpDraft(result.otp_code) : "");
@@ -999,7 +1073,7 @@ export function ChatApp() {
     event.preventDefault();
     const clean = getSubmitPhoneNumber(changePhoneInput);
     const code = normalizeOtpDraft(changePhoneOtpInput);
-    if (!accessToken || isVerifyingPhoneOtp) {
+    if (!isAuthenticated || isVerifyingPhoneOtp) {
       return;
     }
 
@@ -1018,9 +1092,7 @@ export function ChatApp() {
     setPhoneChangeMessage(null);
 
     try {
-      const user = await performAuthenticated((access) =>
-        verifyPhoneChangeOtp(access, { phone_number: clean, otp: code }),
-      );
+      const user = await performAuthenticated(() => verifyPhoneChangeOtp({ phone_number: clean, otp: code }));
       setCurrentUser(user);
       setPhoneNumber(user.phone_number);
       setPhoneInput(user.phone_number);
@@ -1061,7 +1133,8 @@ export function ChatApp() {
 
     setError(null);
     try {
-      const detail = await performAuthenticated((access) => getConversation(conversationId, access));
+      const detail = await performAuthenticated(() => getConversation(conversationId));
+      queryClient.setQueryData(["conversation", conversationId], detail);
       setActiveConversation(detail);
       setIsComposingNewChat(false);
       setOpenConversationMenuId(null);
@@ -1092,9 +1165,7 @@ export function ChatApp() {
 
     setError(null);
     try {
-      const updated = await performAuthenticated((access) =>
-        updateConversation(conversationId, access, { title }),
-      );
+      const updated = await performAuthenticated(() => updateConversation(conversationId, { title }));
       applyConversationUpdate(updated);
       cancelRenameConversation();
     } catch (err) {
@@ -1111,8 +1182,8 @@ export function ChatApp() {
     setOpenConversationMenuId(null);
     setError(null);
     try {
-      const updated = await performAuthenticated((access) =>
-        updateConversation(conversation.id, access, { is_pinned: !conversation.is_pinned }),
+      const updated = await performAuthenticated(() =>
+        updateConversation(conversation.id, { is_pinned: !conversation.is_pinned }),
       );
       applyConversationUpdate(updated);
     } catch (err) {
@@ -1134,7 +1205,7 @@ export function ChatApp() {
     setOpenConversationMenuId(null);
     setError(null);
     try {
-      await performAuthenticated((access) => deleteConversation(conversation.id, access));
+      await performAuthenticated(() => deleteConversation(conversation.id));
       setConversations((prev) => prev.filter((item) => item.id !== conversation.id));
       setActiveConversation((prev) => (prev?.id === conversation.id ? null : prev));
       if (renamingConversationId === conversation.id) {
@@ -1167,7 +1238,7 @@ export function ChatApp() {
     try {
       let conversation = activeConversation;
       if (!conversation) {
-        conversation = await performAuthenticated((access) => createConversation(access));
+        conversation = await performAuthenticated(() => createConversation());
       }
 
       streamingConversationId = conversation.id;
@@ -1203,35 +1274,29 @@ export function ChatApp() {
       });
       scrollToLatestForNewContent("smooth");
 
-      await performAuthenticated((access) =>
+      await performAuthenticated(() =>
         streamMessage(
           conversation.id,
-          access,
           {
             content: message,
             model: selectedModel,
             system_instruction: systemInstruction.trim() || undefined,
           },
           (streamEvent) => {
-            if (streamEvent.type === "conversation") {
+            if (streamEvent.type === "message") {
               setActiveConversation((prev) => {
                 if (prev?.id !== conversation.id) {
                   return prev;
                 }
 
-                const pendingAssistant = prev.messages.find(
-                  (item) => item.id === pendingAssistantMessageId,
-                );
                 return {
-                  ...streamEvent.conversation,
-                  messages: pendingAssistant
-                    ? [...streamEvent.conversation.messages, pendingAssistant]
-                    : streamEvent.conversation.messages,
+                  ...mergeConversationSummary(prev, streamEvent.conversation),
+                  messages: replaceMessageById(prev.messages, pendingUserMessageId, streamEvent.message),
                 };
               });
               setConversations((prev) => {
                 const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
-                return [toConversationSummary(streamEvent.conversation), ...rest];
+                return [streamEvent.conversation, ...rest];
               });
               return;
             }
@@ -1258,10 +1323,21 @@ export function ChatApp() {
             }
 
             if (streamEvent.type === "done") {
-              setActiveConversation(streamEvent.conversation);
+              setActiveConversation((prev) =>
+                prev?.id === conversation.id
+                  ? {
+                      ...mergeConversationSummary(prev, streamEvent.conversation),
+                      messages: replaceMessageById(
+                        prev.messages,
+                        pendingAssistantMessageId,
+                        streamEvent.message,
+                      ),
+                    }
+                  : prev,
+              );
               setConversations((prev) => {
                 const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
-                return [toConversationSummary(streamEvent.conversation), ...rest];
+                return [streamEvent.conversation, ...rest];
               });
             }
           },
@@ -1374,11 +1450,10 @@ export function ChatApp() {
     scrollToLatestForNewContent("smooth");
 
     try {
-      await performAuthenticated((access) =>
+      await performAuthenticated(() =>
         streamRegenerateMessage(
           originalConversation.id,
           message.id,
-          access,
           {
             model: selectedModel,
             system_instruction: systemInstruction.trim() || undefined,
@@ -1386,7 +1461,7 @@ export function ChatApp() {
           (streamEvent) => {
             didReceiveStreamEvent = true;
 
-            if (streamEvent.type === "conversation") {
+            if (streamEvent.type === "sync") {
               setActiveConversation((prev) => {
                 if (prev?.id !== originalConversation.id) {
                   return prev;
@@ -1431,10 +1506,21 @@ export function ChatApp() {
             }
 
             if (streamEvent.type === "done") {
-              setActiveConversation(streamEvent.conversation);
+              setActiveConversation((prev) =>
+                prev?.id === originalConversation.id
+                  ? {
+                      ...mergeConversationSummary(prev, streamEvent.conversation),
+                      messages: replaceMessageById(
+                        prev.messages,
+                        pendingAssistantMessageId,
+                        streamEvent.message,
+                      ),
+                    }
+                  : prev,
+              );
               setConversations((prev) => {
                 const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
-                return [toConversationSummary(streamEvent.conversation), ...rest];
+                return [streamEvent.conversation, ...rest];
               });
             }
           },
@@ -1580,11 +1666,10 @@ export function ChatApp() {
     scrollToLatestForNewContent("smooth");
 
     try {
-      await performAuthenticated((access) =>
+      await performAuthenticated(() =>
         streamEditMessage(
           originalConversation.id,
           message.id,
-          access,
           {
             content,
             model: selectedModel,
@@ -1593,7 +1678,7 @@ export function ChatApp() {
           (streamEvent) => {
             didReceiveStreamEvent = true;
 
-            if (streamEvent.type === "conversation") {
+            if (streamEvent.type === "sync") {
               setActiveConversation((prev) => {
                 if (prev?.id !== originalConversation.id) {
                   return prev;
@@ -1638,10 +1723,21 @@ export function ChatApp() {
             }
 
             if (streamEvent.type === "done") {
-              setActiveConversation(streamEvent.conversation);
+              setActiveConversation((prev) =>
+                prev?.id === originalConversation.id
+                  ? {
+                      ...mergeConversationSummary(prev, streamEvent.conversation),
+                      messages: replaceMessageById(
+                        prev.messages,
+                        pendingAssistantMessageId,
+                        streamEvent.message,
+                      ),
+                    }
+                  : prev,
+              );
               setConversations((prev) => {
                 const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
-                return [toConversationSummary(streamEvent.conversation), ...rest];
+                return [streamEvent.conversation, ...rest];
               });
             }
           },
@@ -1694,8 +1790,8 @@ export function ChatApp() {
     const forkTab = window.open("about:blank", "_blank");
 
     try {
-      const forkedConversation = await performAuthenticated((access) =>
-        forkConversationFromMessage(activeConversation.id, message.id, access),
+      const forkedConversation = await performAuthenticated(() =>
+        forkConversationFromMessage(activeConversation.id, message.id),
       );
 
       setConversations((prev) => {
@@ -1931,10 +2027,7 @@ export function ChatApp() {
 
     try {
       const session = await verifyOtp({ phone_number: clean, otp: code, auth_mode: authMode });
-      persistAuthSession({
-        access: session.access,
-        refresh: session.refresh,
-      });
+      persistAuthSession({ authenticated: true });
       setCurrentUser(session.user);
       setPhoneNumber(session.user.phone_number);
       setPhoneInput(session.user.phone_number);
@@ -2169,7 +2262,7 @@ export function ChatApp() {
           {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           <span>{isDark ? "Light mode" : "Night mode"}</span>
         </button>
-        {accessToken ? (
+        {isAuthenticated ? (
           <button
             type="button"
             onClick={handleSignOut}
@@ -2291,7 +2384,7 @@ export function ChatApp() {
 
             {accountTab === "profile" ? (
               <div className="space-y-6">
-                {!accessToken ? (
+                {!isAuthenticated ? (
                   <div className={cn("rounded-lg border px-4 py-3 text-sm", dividerClass, mutedTextClass)}>
                     Sign in to edit your profile.
                   </div>
@@ -2658,7 +2751,7 @@ export function ChatApp() {
             <button
               type="button"
               onClick={handleCreateConversation}
-              disabled={!accessToken}
+              disabled={!isAuthenticated}
               className={cn(
                 "flex h-10 w-full items-center gap-3 rounded-lg px-3 text-start text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
                 isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#ececec]",
@@ -2693,7 +2786,7 @@ export function ChatApp() {
           </div>
 
           <ScrollArea className="min-h-0 flex-1 px-2 pb-3">
-            {!accessToken ? (
+            {!isAuthenticated ? (
               <div
                 className={cn(
                   "mx-1 rounded-lg border border-dashed px-3 py-4 text-sm",
@@ -2704,7 +2797,7 @@ export function ChatApp() {
               </div>
             ) : null}
 
-            {accessToken && isLoadingConversations ? (
+            {isAuthenticated && isLoadingConversations ? (
               <div className={cn("px-3 py-2 text-sm", isDark ? "text-[#9b9b9b]" : "text-[#6f6f6f]")}>
                 Loading chats...
               </div>
@@ -2715,7 +2808,7 @@ export function ChatApp() {
             {renderConversationGroup("Last week", groupedConversations.lastWeek)}
             {renderConversationGroup("More than 30 days", groupedConversations.olderThan30)}
 
-            {accessToken &&
+            {isAuthenticated &&
             !isLoadingConversations &&
             conversations.length > 0 &&
             !groupedConversations.pinned.length &&
@@ -2893,7 +2986,7 @@ export function ChatApp() {
               className="h-full min-h-0"
             >
               <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-4 py-8 md:px-6">
-              {!accessToken ? (
+              {!isAuthenticated ? (
                 <div className="flex flex-1 items-center justify-center">
                   <form
                     onSubmit={isOtpRequested ? handleVerifyOtp : handleRequestOtp}
@@ -3194,7 +3287,7 @@ export function ChatApp() {
             ) : null}
           </div>
 
-          {accessToken ? (
+          {isAuthenticated ? (
             <div className="shrink-0 px-3 pb-4 md:px-4">
               <form
                 onSubmit={handleSendMessage}

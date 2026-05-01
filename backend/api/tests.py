@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.test import SimpleTestCase, TestCase
+from django.test.utils import CaptureQueriesContext
+from django.db import connection
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -224,7 +226,7 @@ class ConversationAuthorizationTests(TestCase):
         )
 
         self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(list_response.data, [])
+        self.assertEqual(list_response.data, {"results": [], "next_cursor": None})
         self.assertEqual(detail_response.status_code, 404)
         self.assertEqual(send_response.status_code, 404)
         self.assertEqual(regenerate_response.status_code, 404)
@@ -270,6 +272,79 @@ class ConversationAuthorizationTests(TestCase):
         conversation.refresh_from_db()
         self.assertEqual(conversation.title, "Private")
 
+    def test_conversation_list_uses_cursor_pages_without_loading_messages(self):
+        self.authenticate(self.user)
+        for index in range(3):
+            conversation = Conversation.objects.create(user=self.user, title=f"Chat {index}")
+            for message_index in range(2):
+                Message.objects.create(
+                    conversation=conversation,
+                    role=Message.Role.USER,
+                    content=f"Message {index}-{message_index}",
+                )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get("/api/conversations/?limit=2")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertIsNotNone(response.data["next_cursor"])
+        self.assertFalse(
+            any('FROM "api_message"' in query["sql"] for query in queries),
+            [query["sql"] for query in queries],
+        )
+
+        next_response = self.client.get(f"/api/conversations/?limit=2&cursor={response.data['next_cursor']}")
+        self.assertEqual(next_response.status_code, 200)
+        self.assertEqual(len(next_response.data["results"]), 1)
+        self.assertIsNone(next_response.data["next_cursor"])
+
+    def test_conversation_list_cache_invalidates_after_rename(self):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user, title="Original")
+
+        first_response = self.client.get("/api/conversations/")
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(first_response.data["results"][0]["title"], "Original")
+
+        update_response = self.client.patch(
+            f"/api/conversations/{conversation.id}/",
+            {"title": "Renamed"},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, 200)
+
+        second_response = self.client.get("/api/conversations/")
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(second_response.data["results"][0]["title"], "Renamed")
+
+    def test_conversation_detail_uses_message_cursor_pages(self):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user, title="Paged")
+        for index in range(3):
+            Message.objects.create(
+                conversation=conversation,
+                role=Message.Role.USER,
+                content=f"Message {index}",
+            )
+
+        first_response = self.client.get(f"/api/conversations/{conversation.id}/?limit=2")
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(
+            [message["content"] for message in first_response.data["messages"]],
+            ["Message 1", "Message 2"],
+        )
+        self.assertIsNotNone(first_response.data["next_before"])
+
+        next_response = self.client.get(
+            f"/api/conversations/{conversation.id}/?limit=2&before={first_response.data['next_before']}"
+        )
+        self.assertEqual(next_response.status_code, 200)
+        self.assertEqual(
+            [message["content"] for message in next_response.data["messages"]],
+            ["Message 0"],
+        )
+
     @patch("api.views.stream_vllm_chat")
     def test_streaming_message_returns_deltas_and_persists_assistant(self, mock_stream_vllm_chat):
         self.authenticate(self.user)
@@ -288,10 +363,12 @@ class ConversationAuthorizationTests(TestCase):
         body = b"".join(response.streaming_content).decode("utf-8")
         events = [json.loads(line) for line in body.splitlines()]
 
-        self.assertEqual([event["type"] for event in events], ["conversation", "delta", "delta", "done"])
+        self.assertEqual([event["type"] for event in events], ["message", "delta", "delta", "done"])
+        self.assertEqual(events[0]["message"]["content"], "Hi")
         self.assertEqual(events[1]["delta"], "Hello")
         self.assertEqual(events[2]["delta"], " stream")
-        self.assertEqual(events[3]["conversation"]["messages"][-1]["content"], "Hello stream")
+        self.assertEqual(events[3]["message"]["content"], "Hello stream")
+        self.assertEqual(events[3]["conversation"]["last_message_preview"], "Hello stream")
         self.assertTrue(
             Message.objects.filter(
                 conversation=conversation,
@@ -326,9 +403,9 @@ class ConversationAuthorizationTests(TestCase):
         body = b"".join(response.streaming_content).decode("utf-8")
         events = [json.loads(line) for line in body.splitlines()]
 
-        self.assertEqual([event["type"] for event in events], ["conversation", "delta", "delta", "done"])
+        self.assertEqual([event["type"] for event in events], ["sync", "delta", "delta", "done"])
         self.assertEqual([message["content"] for message in events[0]["conversation"]["messages"]], ["Explain this"])
-        self.assertEqual(events[3]["conversation"]["messages"][-1]["content"], "New answer")
+        self.assertEqual(events[3]["message"]["content"], "New answer")
 
         stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
         self.assertEqual([message.content for message in stored_messages], ["Explain this", "New answer"])
@@ -469,9 +546,9 @@ class ConversationAuthorizationTests(TestCase):
         body = b"".join(response.streaming_content).decode("utf-8")
         events = [json.loads(line) for line in body.splitlines()]
 
-        self.assertEqual([event["type"] for event in events], ["conversation", "delta", "delta", "done"])
+        self.assertEqual([event["type"] for event in events], ["sync", "delta", "delta", "done"])
         self.assertEqual([message["content"] for message in events[0]["conversation"]["messages"]], ["Edited question"])
-        self.assertEqual(events[3]["conversation"]["messages"][-1]["content"], "New answer")
+        self.assertEqual(events[3]["message"]["content"], "New answer")
 
         stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
         self.assertEqual([message.content for message in stored_messages], ["Edited question", "New answer"])

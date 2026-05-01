@@ -10,43 +10,32 @@ class MessageSerializer(serializers.ModelSerializer):
 
 
 class ConversationListSerializer(serializers.ModelSerializer):
-    user_phone_number = serializers.CharField(source="user.phone_number", read_only=True)
-    last_message_preview = serializers.SerializerMethodField()
-
     class Meta:
         model = Conversation
         fields = (
             "id",
             "title",
-            "user_phone_number",
             "is_pinned",
             "created_at",
             "updated_at",
             "last_message_preview",
+            "message_count",
+            "last_message_at",
         )
-
-    def get_last_message_preview(self, obj: Conversation) -> str:
-        messages = list(obj.messages.all())
-        last_message = messages[-1] if messages else None
-        if not last_message:
-            return ""
-        return (last_message.content[:120] + "...") if len(last_message.content) > 120 else last_message.content
 
 
 class ConversationDetailSerializer(serializers.ModelSerializer):
-    user_phone_number = serializers.CharField(source="user.phone_number", read_only=True)
-    messages = MessageSerializer(many=True, read_only=True)
-
     class Meta:
         model = Conversation
         fields = (
             "id",
             "title",
-            "user_phone_number",
             "is_pinned",
             "created_at",
             "updated_at",
-            "messages",
+            "last_message_preview",
+            "message_count",
+            "last_message_at",
         )
 
 

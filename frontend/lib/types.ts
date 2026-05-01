@@ -10,21 +10,42 @@ export interface ChatMessage {
 export interface Conversation {
   id: string;
   title: string;
-  user_phone_number?: string;
   is_pinned: boolean;
   created_at: string;
   updated_at: string;
   last_message_preview?: string;
+  message_count: number;
+  last_message_at: string | null;
 }
 
 export interface ConversationDetail extends Conversation {
   messages: ChatMessage[];
+  next_before: string | null;
   active_model?: string;
+}
+
+export interface CursorPage<T> {
+  results: T[];
+  next_cursor: string | null;
+}
+
+export type ConversationPage = CursorPage<Conversation>;
+
+export interface InitialChatData {
+  user: AuthUser | null;
+  conversations: ConversationPage;
+  activeConversation: ConversationDetail | null;
+  csrf_token: string;
 }
 
 export type ChatStreamEvent =
   | {
-      type: "conversation";
+      type: "message";
+      message: ChatMessage;
+      conversation: Conversation;
+    }
+  | {
+      type: "sync";
       conversation: ConversationDetail;
     }
   | {
@@ -33,7 +54,9 @@ export type ChatStreamEvent =
     }
   | {
       type: "done";
-      conversation: ConversationDetail;
+      message: ChatMessage;
+      conversation: Conversation;
+      active_model?: string;
     }
   | {
       type: "error";
@@ -55,8 +78,8 @@ export interface OTPRequestResponse {
 }
 
 export interface AuthTokenResponse {
-  access: string;
-  refresh: string;
+  access?: string;
+  refresh?: string;
   token_type: "Bearer";
   access_expires_at: string;
   refresh_expires_at: string;
@@ -64,7 +87,7 @@ export interface AuthTokenResponse {
 }
 
 export interface TokenRefreshResponse {
-  access: string;
+  access?: string;
   refresh?: string;
 }
 

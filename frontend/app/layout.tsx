@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 
+import { AppQueryProvider } from "@/components/query-provider";
+
 import "katex/dist/katex.min.css";
 import "./globals.css";
 
@@ -15,7 +17,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full antialiased">
-      <body className="min-h-full font-sans text-slate-900">{children}</body>
+      <body className="min-h-full font-sans text-slate-900">
+        <AppQueryProvider>{children}</AppQueryProvider>
+      </body>
     </html>
   );
 }

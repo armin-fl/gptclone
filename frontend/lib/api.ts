@@ -3,13 +3,14 @@ import type {
   AuthTokenResponse,
   AuthUser,
   ChatStreamEvent,
-  Conversation,
+  ConversationPage,
   ConversationDetail,
+  InitialChatData,
   OTPRequestResponse,
   TokenRefreshResponse,
 } from "@/lib/types";
 
-const API_BASE_URL = "http://127.0.0.1:8000";
+const CSRF_COOKIE = "chat_csrf_token";
 
 export class HttpError extends Error {
   public status: number;
@@ -55,16 +56,47 @@ async function readErrorPayload(response: Response): Promise<ApiError | null> {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit, accessToken?: string): Promise<T> {
+function getCookie(name: string): string | null {
+  if (typeof document === "undefined") {
+    return null;
+  }
+  const match = document.cookie
+    .split("; ")
+    .find((part) => part.startsWith(`${name}=`));
+  return match ? decodeURIComponent(match.slice(name.length + 1)) : null;
+}
+
+async function ensureCsrfToken(): Promise<string> {
+  const existing = getCookie(CSRF_COOKIE);
+  if (existing) {
+    return existing;
+  }
+  await request<InitialChatData>("/api/auth/session/", { method: "GET" }, { skipCsrf: true });
+  const refreshed = getCookie(CSRF_COOKIE);
+  if (!refreshed) {
+    throw new Error("Could not initialize CSRF protection.");
+  }
+  return refreshed;
+}
+
+interface RequestOptions {
+  skipCsrf?: boolean;
+}
+
+async function request<T>(path: string, init?: RequestInit, options: RequestOptions = {}): Promise<T> {
   const isFormData = init?.body instanceof FormData;
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const method = init?.method?.toUpperCase() ?? "GET";
+  const isUnsafe = method !== "GET" && method !== "HEAD";
+  const csrfToken = isUnsafe && !options.skipCsrf ? await ensureCsrfToken() : null;
+  const response = await fetch(path, {
     ...init,
     headers: {
       ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
       ...(init?.headers ?? {}),
     },
     cache: "no-store",
+    credentials: "same-origin",
   });
 
   if (!response.ok) {
@@ -77,6 +109,16 @@ async function request<T>(path: string, init?: RequestInit, accessToken?: string
   }
 
   return (await response.json()) as T;
+}
+
+export function getSession() {
+  return request<InitialChatData>("/api/auth/session/");
+}
+
+export function signOut() {
+  return request<{ detail: string }>("/api/auth/session/", {
+    method: "DELETE",
+  });
 }
 
 export function requestOtp(phoneNumber: string, authMode: "login" | "register") {
@@ -93,98 +135,116 @@ export function verifyOtp(payload: { phone_number: string; otp: string; auth_mod
   });
 }
 
-export function refreshAuthToken(refresh: string) {
+export function refreshAuthToken() {
   return request<TokenRefreshResponse>("/api/auth/refresh/", {
     method: "POST",
-    body: JSON.stringify({ refresh }),
   });
 }
 
-export function getMe(accessToken: string) {
-  return request<AuthUser>("/api/auth/me/", undefined, accessToken);
+export function getMe() {
+  return request<AuthUser>("/api/auth/me/");
 }
 
-export function updateMe(accessToken: string, payload: FormData) {
+export function updateMe(payload: FormData) {
   return request<AuthUser>("/api/auth/me/", {
     method: "PATCH",
     body: payload,
-  }, accessToken);
+  });
 }
 
-export function requestPhoneChangeOtp(accessToken: string, phoneNumber: string) {
+export function requestPhoneChangeOtp(phoneNumber: string) {
   return request<OTPRequestResponse>("/api/auth/change-phone/request-otp/", {
     method: "POST",
     body: JSON.stringify({ phone_number: phoneNumber }),
-  }, accessToken);
+  });
 }
 
-export function verifyPhoneChangeOtp(
-  accessToken: string,
-  payload: { phone_number: string; otp: string },
-) {
+export function verifyPhoneChangeOtp(payload: { phone_number: string; otp: string }) {
   return request<AuthUser>("/api/auth/change-phone/verify-otp/", {
     method: "POST",
     body: JSON.stringify(payload),
-  }, accessToken);
+  });
 }
 
-export function listConversations(accessToken: string) {
-  return request<Conversation[]>("/api/conversations/", undefined, accessToken);
+export function listConversations(
+  params: { cursor?: string | null; limit?: number; q?: string } = {},
+) {
+  const search = new URLSearchParams();
+  if (params.cursor) {
+    search.set("cursor", params.cursor);
+  }
+  if (params.limit) {
+    search.set("limit", String(params.limit));
+  }
+  if (params.q?.trim()) {
+    search.set("q", params.q.trim());
+  }
+  const suffix = search.toString();
+  return request<ConversationPage>(`/api/conversations/${suffix ? `?${suffix}` : ""}`);
 }
 
-export function getConversation(conversationId: string, accessToken: string) {
-  return request<ConversationDetail>(`/api/conversations/${conversationId}/`, undefined, accessToken);
+export function getConversation(
+  conversationId: string,
+  params: { before?: string | null; limit?: number } = {},
+) {
+  const search = new URLSearchParams();
+  if (params.before) {
+    search.set("before", params.before);
+  }
+  if (params.limit) {
+    search.set("limit", String(params.limit));
+  }
+  const suffix = search.toString();
+  return request<ConversationDetail>(`/api/conversations/${conversationId}/${suffix ? `?${suffix}` : ""}`);
 }
 
 export function updateConversation(
   conversationId: string,
-  accessToken: string,
   payload: { title?: string; is_pinned?: boolean },
 ) {
   return request<ConversationDetail>(`/api/conversations/${conversationId}/`, {
     method: "PATCH",
     body: JSON.stringify(payload),
-  }, accessToken);
+  });
 }
 
-export function deleteConversation(conversationId: string, accessToken: string) {
+export function deleteConversation(conversationId: string) {
   return request<void>(`/api/conversations/${conversationId}/`, {
     method: "DELETE",
-  }, accessToken);
+  });
 }
 
-export function createConversation(accessToken: string, payload: { title?: string } = {}) {
+export function createConversation(payload: { title?: string } = {}) {
   return request<ConversationDetail>("/api/conversations/", {
     method: "POST",
     body: JSON.stringify(payload),
-  }, accessToken);
+  });
 }
 
 export function forkConversationFromMessage(
   conversationId: string,
   messageId: number,
-  accessToken: string,
 ) {
   return request<ConversationDetail>(`/api/conversations/${conversationId}/messages/${messageId}/fork/`, {
     method: "POST",
-  }, accessToken);
+  });
 }
 
 async function streamChatResponse(
   path: string,
-  accessToken: string,
   payload: Record<string, unknown>,
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,
 ) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
+      "X-CSRF-Token": await ensureCsrfToken(),
     },
     body: JSON.stringify({ ...payload, stream: true }),
     cache: "no-store",
+    credentials: "same-origin",
     signal,
   });
 
@@ -241,7 +301,6 @@ async function streamChatResponse(
 
 export async function streamMessage(
   conversationId: string,
-  accessToken: string,
   payload: {
     content: string;
     model?: string;
@@ -252,7 +311,6 @@ export async function streamMessage(
 ) {
   await streamChatResponse(
     `/api/conversations/${conversationId}/messages/`,
-    accessToken,
     payload,
     onEvent,
     signal,
@@ -262,7 +320,6 @@ export async function streamMessage(
 export async function streamRegenerateMessage(
   conversationId: string,
   messageId: number,
-  accessToken: string,
   payload: {
     model?: string;
     system_instruction?: string;
@@ -272,7 +329,6 @@ export async function streamRegenerateMessage(
 ) {
   await streamChatResponse(
     `/api/conversations/${conversationId}/messages/${messageId}/regenerate/`,
-    accessToken,
     payload,
     onEvent,
     signal,
@@ -282,7 +338,6 @@ export async function streamRegenerateMessage(
 export async function streamEditMessage(
   conversationId: string,
   messageId: number,
-  accessToken: string,
   payload: {
     content: string;
     model?: string;
@@ -293,7 +348,6 @@ export async function streamEditMessage(
 ) {
   await streamChatResponse(
     `/api/conversations/${conversationId}/messages/${messageId}/edit/`,
-    accessToken,
     payload,
     onEvent,
     signal,

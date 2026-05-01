@@ -8,6 +8,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from api.cache import bump_user_conversations
+
 from .models import PhoneOTP, User
 from .serializers import (
     PhoneChangeRequestSerializer,
@@ -91,6 +93,7 @@ class MeView(APIView):
         serializer = UserProfileUpdateSerializer(request.user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+        bump_user_conversations(user.id)
         return Response(UserSerializer(user, context={"request": request}).data)
 
 
@@ -141,4 +144,5 @@ class VerifyPhoneChangeOTPView(APIView):
                 {"detail": "This phone number is already in use."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        bump_user_conversations(request.user.id)
         return Response(UserSerializer(request.user, context={"request": request}).data)

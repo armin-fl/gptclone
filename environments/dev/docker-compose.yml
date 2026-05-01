@@ -91,6 +91,22 @@ services:
     volumes:
       - ../../data/vllm-pgadmin:/var/lib/pgadmin
 
+  app-redis:
+    image: docker.io/redis:7
+    container_name: gptclone-app-redis-dev
+    restart: unless-stopped
+    command: >
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - app_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3
     container_name: vllm-langfuse-worker-dev
@@ -209,6 +225,7 @@ services:
       retries: 10
 
 volumes:
+  app_redis_data:
   langfuse_postgres_data:
   langfuse_clickhouse_data:
   langfuse_clickhouse_logs:

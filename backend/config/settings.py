@@ -1,6 +1,7 @@
 """Django settings for local development only."""
 
 import os
+import sys
 from datetime import timedelta
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -63,6 +64,27 @@ DATABASES = {
         "PORT": "5432",
     }
 }
+
+APP_REDIS_URL = os.environ.get("APP_REDIS_URL", "redis://127.0.0.1:6380/0")
+if "test" in sys.argv:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "gptclone-tests",
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": APP_REDIS_URL,
+        }
+    }
+
+CHAT_PAGE_CACHE_SECONDS = int(os.environ.get("CHAT_PAGE_CACHE_SECONDS", "60"))
+CHAT_CONVERSATION_PAGE_SIZE = int(os.environ.get("CHAT_CONVERSATION_PAGE_SIZE", "30"))
+CHAT_MESSAGE_PAGE_SIZE = int(os.environ.get("CHAT_MESSAGE_PAGE_SIZE", "50"))
+CHAT_PROMPT_HISTORY_MESSAGE_LIMIT = int(os.environ.get("CHAT_PROMPT_HISTORY_MESSAGE_LIMIT", "40"))
 
 AUTH_USER_MODEL = "accounts.User"
 
