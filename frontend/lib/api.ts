@@ -160,33 +160,24 @@ export function createConversation(accessToken: string, payload: { title?: strin
   }, accessToken);
 }
 
-export function sendMessage(
+export function forkConversationFromMessage(
   conversationId: string,
+  messageId: number,
   accessToken: string,
-  payload: {
-    content: string;
-    model?: string;
-    system_instruction?: string;
-  },
 ) {
-  return request<ConversationDetail>(`/api/conversations/${conversationId}/messages/`, {
+  return request<ConversationDetail>(`/api/conversations/${conversationId}/messages/${messageId}/fork/`, {
     method: "POST",
-    body: JSON.stringify(payload),
   }, accessToken);
 }
 
-export async function streamMessage(
-  conversationId: string,
+async function streamChatResponse(
+  path: string,
   accessToken: string,
-  payload: {
-    content: string;
-    model?: string;
-    system_instruction?: string;
-  },
+  payload: Record<string, unknown>,
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,
 ) {
-  const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/messages/`, {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -246,4 +237,65 @@ export async function streamMessage(
 
   buffer += decoder.decode();
   await emitLine(buffer);
+}
+
+export async function streamMessage(
+  conversationId: string,
+  accessToken: string,
+  payload: {
+    content: string;
+    model?: string;
+    system_instruction?: string;
+  },
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+) {
+  await streamChatResponse(
+    `/api/conversations/${conversationId}/messages/`,
+    accessToken,
+    payload,
+    onEvent,
+    signal,
+  );
+}
+
+export async function streamRegenerateMessage(
+  conversationId: string,
+  messageId: number,
+  accessToken: string,
+  payload: {
+    model?: string;
+    system_instruction?: string;
+  },
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+) {
+  await streamChatResponse(
+    `/api/conversations/${conversationId}/messages/${messageId}/regenerate/`,
+    accessToken,
+    payload,
+    onEvent,
+    signal,
+  );
+}
+
+export async function streamEditMessage(
+  conversationId: string,
+  messageId: number,
+  accessToken: string,
+  payload: {
+    content: string;
+    model?: string;
+    system_instruction?: string;
+  },
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+) {
+  await streamChatResponse(
+    `/api/conversations/${conversationId}/messages/${messageId}/edit/`,
+    accessToken,
+    payload,
+    onEvent,
+    signal,
+  );
 }

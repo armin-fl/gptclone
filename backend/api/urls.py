@@ -2,7 +2,10 @@ from django.urls import path
 
 from .views import (
     ConversationDetailView,
+    ConversationEditMessageView,
+    ConversationForkMessageView,
     ConversationListCreateView,
+    ConversationRegenerateMessageView,
     ConversationSendMessageView,
 )
 
@@ -13,5 +16,20 @@ urlpatterns = [
         "conversations/<uuid:conversation_id>/messages/",
         ConversationSendMessageView.as_view(),
         name="conversation-send-message",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/messages/<int:message_id>/regenerate/",
+        ConversationRegenerateMessageView.as_view(),
+        name="conversation-regenerate-message",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/messages/<int:message_id>/fork/",
+        ConversationForkMessageView.as_view(),
+        name="conversation-fork-message",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/messages/<int:message_id>/edit/",
+        ConversationEditMessageView.as_view(),
+        name="conversation-edit-message",
     ),
 ]

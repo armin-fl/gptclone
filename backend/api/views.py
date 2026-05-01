@@ -16,6 +16,8 @@ from .serializers import (
     ConversationDetailSerializer,
     ConversationListSerializer,
     ConversationUpdateSerializer,
+    EditMessageSerializer,
+    RegenerateMessageSerializer,
     SendMessageSerializer,
 )
 from .services import (
@@ -33,6 +35,14 @@ def _build_title_from_user_message(content: str) -> str:
     if len(title) > 60:
         title = f"{title[:57]}..."
     return title or Conversation.DEFAULT_TITLE
+
+
+def _build_fork_title(title: str) -> str:
+    base_title = " ".join(title.split()) or Conversation.DEFAULT_TITLE
+    suffix = " (fork)"
+    if len(base_title) + len(suffix) > 255:
+        base_title = base_title[: 255 - len(suffix)].rstrip()
+    return f"{base_title}{suffix}"
 
 
 def _stream_event(event: dict) -> bytes:
@@ -340,4 +350,330 @@ class ConversationSendMessageView(APIView):
             conversation.save(update_fields=["title", "updated_at"])
 
         # Flow 8: reload and serialize the full conversation as the HTTP response back to the client.
+        return Response(self._serialize_conversation(conversation.id, model))
+
+
+class ConversationRegenerateMessageView(ConversationSendMessageView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, conversation_id, message_id):
+        serializer = RegenerateMessageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        conversation = (
+            Conversation.objects.select_related("user")
+            .filter(id=conversation_id, user=request.user)
+            .first()
+        )
+        if not conversation:
+            return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        model = serializer.validated_data.get("model") or settings.VLLM_MODEL
+        if model not in get_available_vllm_models():
+            return Response(
+                {
+                    "detail": "Unsupported vLLM model.",
+                    "available_models": get_available_vllm_models(),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        system_instruction = (
+            serializer.validated_data.get("system_instruction")
+            or "You are a helpful AI assistant. Keep answers clear and concise unless asked otherwise."
+        )
+        wants_stream = serializer.validated_data.get("stream", False)
+
+        with transaction.atomic():
+            locked_conversation = (
+                Conversation.objects.select_for_update()
+                .get(id=conversation.id)
+            )
+            messages = list(
+                Message.objects.filter(conversation=locked_conversation).order_by("created_at", "id")
+            )
+            target_index = next(
+                (index for index, message in enumerate(messages) if message.id == message_id),
+                None,
+            )
+            if target_index is None:
+                return Response({"detail": "Message not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            target_message = messages[target_index]
+            if target_message.role != Message.Role.ASSISTANT:
+                return Response(
+                    {"detail": "Only assistant messages can be regenerated."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if target_index != len(messages) - 1:
+                return Response(
+                    {
+                        "detail": (
+                            "Only the latest assistant message can be regenerated. "
+                            "Fork the chat from an earlier message instead."
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            user_index = None
+            for index in range(target_index - 1, -1, -1):
+                if messages[index].role == Message.Role.USER:
+                    user_index = index
+                    break
+
+            if user_index is None:
+                return Response(
+                    {"detail": "No user message was found before this assistant response."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            user_message = messages[user_index]
+            previous_messages = messages[:user_index]
+            history_system_message = build_history_as_system_message(previous_messages)
+            llm_messages = [
+                {
+                    "role": "system",
+                    "content": f"{system_instruction}\n\n{history_system_message}",
+                },
+                {
+                    "role": "user",
+                    "content": user_message.content,
+                },
+            ]
+            langfuse_metadata = {
+                "conversation_id": str(locked_conversation.id),
+                "message_id": user_message.id,
+                "regenerated_message_id": target_message.id,
+            }
+
+            target_message.delete()
+            locked_conversation.updated_at = timezone.now()
+            locked_conversation.save(update_fields=["updated_at"])
+
+            if wants_stream:
+                return self._streaming_response(
+                    conversation_id=locked_conversation.id,
+                    model=model,
+                    llm_messages=llm_messages,
+                    langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
+                    langfuse_metadata=langfuse_metadata,
+                )
+
+            try:
+                assistant_reply = request_vllm_chat(
+                    model=model,
+                    messages=llm_messages,
+                    langfuse_session_id=str(locked_conversation.id),
+                    langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
+                    langfuse_metadata=langfuse_metadata,
+                )
+            except UnsupportedVllmModelError as exc:
+                transaction.set_rollback(True)
+                return Response(
+                    {
+                        "detail": "Unsupported vLLM model.",
+                        "error": str(exc),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            except RuntimeError as exc:
+                transaction.set_rollback(True)
+                return Response(
+                    {
+                        "detail": "Failed to get response from vLLM.",
+                        "error": str(exc),
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+            Message.objects.create(
+                conversation=locked_conversation,
+                role=Message.Role.ASSISTANT,
+                content=assistant_reply,
+            )
+            locked_conversation.updated_at = timezone.now()
+            locked_conversation.save(update_fields=["updated_at"])
+
+        return Response(self._serialize_conversation(conversation.id, model))
+
+
+class ConversationForkMessageView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, conversation_id, message_id):
+        conversation = (
+            Conversation.objects.select_related("user")
+            .filter(id=conversation_id, user=request.user)
+            .first()
+        )
+        if not conversation:
+            return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
+        target_index = next(
+            (index for index, message in enumerate(messages) if message.id == message_id),
+            None,
+        )
+        if target_index is None:
+            return Response({"detail": "Message not found."}, status=status.HTTP_404_NOT_FOUND)
+        if messages[target_index].role != Message.Role.ASSISTANT:
+            return Response(
+                {"detail": "Only assistant responses can be forked."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        messages_to_copy = messages[: target_index + 1]
+
+        with transaction.atomic():
+            forked_conversation = Conversation.objects.create(
+                user=request.user,
+                title=_build_fork_title(conversation.title),
+            )
+            Message.objects.bulk_create(
+                [
+                    Message(
+                        conversation=forked_conversation,
+                        role=message.role,
+                        content=message.content,
+                    )
+                    for message in messages_to_copy
+                ]
+            )
+
+        refreshed = (
+            Conversation.objects.select_related("user")
+            .prefetch_related("messages")
+            .get(id=forked_conversation.id)
+        )
+        return Response(ConversationDetailSerializer(refreshed).data, status=status.HTTP_201_CREATED)
+
+
+class ConversationEditMessageView(ConversationSendMessageView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, conversation_id, message_id):
+        serializer = EditMessageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        conversation = (
+            Conversation.objects.select_related("user")
+            .filter(id=conversation_id, user=request.user)
+            .first()
+        )
+        if not conversation:
+            return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        model = serializer.validated_data.get("model") or settings.VLLM_MODEL
+        if model not in get_available_vllm_models():
+            return Response(
+                {
+                    "detail": "Unsupported vLLM model.",
+                    "available_models": get_available_vllm_models(),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        system_instruction = (
+            serializer.validated_data.get("system_instruction")
+            or "You are a helpful AI assistant. Keep answers clear and concise unless asked otherwise."
+        )
+        wants_stream = serializer.validated_data.get("stream", False)
+        edited_content = serializer.validated_data["content"]
+
+        with transaction.atomic():
+            locked_conversation = Conversation.objects.select_for_update().get(id=conversation.id)
+            messages = list(
+                Message.objects.filter(conversation=locked_conversation).order_by("created_at", "id")
+            )
+            target_index = next(
+                (index for index, message in enumerate(messages) if message.id == message_id),
+                None,
+            )
+            if target_index is None:
+                return Response({"detail": "Message not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            target_message = messages[target_index]
+            if target_message.role != Message.Role.USER:
+                return Response(
+                    {"detail": "Only user requests can be edited."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            previous_messages = messages[:target_index]
+            history_system_message = build_history_as_system_message(previous_messages)
+            llm_messages = [
+                {
+                    "role": "system",
+                    "content": f"{system_instruction}\n\n{history_system_message}",
+                },
+                {
+                    "role": "user",
+                    "content": edited_content,
+                },
+            ]
+            langfuse_metadata = {
+                "conversation_id": str(locked_conversation.id),
+                "message_id": target_message.id,
+                "edited_message_id": target_message.id,
+            }
+
+            target_message.content = edited_content
+            target_message.save(update_fields=["content"])
+            delete_message_ids = [message.id for message in messages[target_index + 1 :]]
+            if delete_message_ids:
+                Message.objects.filter(conversation=locked_conversation, id__in=delete_message_ids).delete()
+
+            if locked_conversation.title == Conversation.DEFAULT_TITLE:
+                locked_conversation.title = _build_title_from_user_message(edited_content)
+                update_fields = ["title", "updated_at"]
+            else:
+                update_fields = ["updated_at"]
+            locked_conversation.updated_at = timezone.now()
+            locked_conversation.save(update_fields=update_fields)
+
+            if wants_stream:
+                return self._streaming_response(
+                    conversation_id=locked_conversation.id,
+                    model=model,
+                    llm_messages=llm_messages,
+                    langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
+                    langfuse_metadata=langfuse_metadata,
+                )
+
+            try:
+                assistant_reply = request_vllm_chat(
+                    model=model,
+                    messages=llm_messages,
+                    langfuse_session_id=str(locked_conversation.id),
+                    langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
+                    langfuse_metadata=langfuse_metadata,
+                )
+            except UnsupportedVllmModelError as exc:
+                transaction.set_rollback(True)
+                return Response(
+                    {
+                        "detail": "Unsupported vLLM model.",
+                        "error": str(exc),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            except RuntimeError as exc:
+                transaction.set_rollback(True)
+                return Response(
+                    {
+                        "detail": "Failed to get response from vLLM.",
+                        "error": str(exc),
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+            Message.objects.create(
+                conversation=locked_conversation,
+                role=Message.Role.ASSISTANT,
+                content=assistant_reply,
+            )
+            locked_conversation.updated_at = timezone.now()
+            locked_conversation.save(update_fields=["updated_at"])
+
         return Response(self._serialize_conversation(conversation.id, model))

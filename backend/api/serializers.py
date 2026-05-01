@@ -85,3 +85,13 @@ class SendMessageSerializer(serializers.Serializer):
         if not clean:
             raise serializers.ValidationError("Message content cannot be empty.")
         return clean
+
+
+class RegenerateMessageSerializer(serializers.Serializer):
+    model = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    system_instruction = serializers.CharField(required=False, allow_blank=True)
+    stream = serializers.BooleanField(required=False, default=False)
+
+
+class EditMessageSerializer(SendMessageSerializer):
+    pass

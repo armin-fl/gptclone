@@ -1,6 +1,18 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "IRANSansXV";
+  src:
+    url("../fonts/webfont/IRANSansXV.woff2") format("woff2-variations"),
+    url("../fonts/webfont/IRANSansXV.woff2") format("woff2"),
+    url("../fonts/webfont/IRANSansXV.woff") format("woff");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 100 1000;
+}
+
 :root {
+  --app-font-sans: "IRANSansXV", Arial, Helvetica, sans-serif;
   --background: #eef2ff;
   --foreground: #0f172a;
 }
@@ -8,7 +20,7 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: Arial, Helvetica, sans-serif;
+  --font-sans: var(--app-font-sans);
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
@@ -26,6 +38,11 @@ body {
 body {
   background: var(--background);
   color: var(--foreground);
+  font-family: var(--app-font-sans);
+}
+
+.font-sans {
+  font-family: var(--app-font-sans);
 }
 
 .chat-message-content,

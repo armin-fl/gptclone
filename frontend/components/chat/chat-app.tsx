@@ -7,6 +7,8 @@ import {
   Camera,
   Check,
   ChevronDown,
+  Copy,
+  GitFork,
   LogOut,
   Menu,
   MessageSquare,
@@ -20,11 +22,14 @@ import {
   Plus,
   Palette,
   Phone,
+  RotateCcw,
   Search,
   Settings,
   Sparkles,
   SquarePen,
   Sun,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   UserRound,
   X,
@@ -33,6 +38,7 @@ import {
 import {
   createConversation,
   deleteConversation,
+  forkConversationFromMessage,
   getConversation,
   getMe,
   HttpError,
@@ -40,6 +46,8 @@ import {
   refreshAuthToken,
   requestPhoneChangeOtp,
   requestOtp,
+  streamEditMessage,
+  streamRegenerateMessage,
   streamMessage,
   updateConversation,
   updateMe,
@@ -60,6 +68,7 @@ const ACCESS_TOKEN_STORAGE_KEY = "chat_access_token";
 const REFRESH_TOKEN_STORAGE_KEY = "chat_refresh_token";
 const THEME_STORAGE_KEY = "chat_theme";
 const SYSTEM_INSTRUCTION_STORAGE_KEY = "chat_system_instruction";
+const EDIT_WARNING_DISABLED_STORAGE_KEY = "chat_edit_warning_disabled";
 const PHONE_PREFIX = "09";
 const PHONE_REST_LENGTH = 9;
 const PHONE_LENGTH = PHONE_PREFIX.length + PHONE_REST_LENGTH;
@@ -193,10 +202,6 @@ function daysAgo(value: string): number {
   return Math.floor((startOfToday - startOfDate) / 86_400_000);
 }
 
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
 function getDisplayName(user: AuthUser | null, fallbackPhoneNumber: string): string {
   const fullName = [user?.first_name, user?.last_name].filter(Boolean).join(" ").trim();
   return fullName || user?.phone_number || fallbackPhoneNumber || "Guest profile";
@@ -265,6 +270,54 @@ function isAbortError(error: unknown): boolean {
   return typeof DOMException !== "undefined" && error instanceof DOMException && error.name === "AbortError";
 }
 
+function getLinkedConversationId(): string | null {
+  const conversationId = new URLSearchParams(window.location.search).get("conversation");
+  return conversationId?.trim() || null;
+}
+
+function buildConversationUrl(conversationId: string): string {
+  const url = new URL(window.location.href);
+  url.pathname = "/";
+  url.searchParams.set("conversation", conversationId);
+  url.hash = "";
+  return url.toString();
+}
+
+function setCurrentConversationUrl(conversationId: string | null) {
+  const url = new URL(window.location.href);
+  if (conversationId) {
+    url.searchParams.set("conversation", conversationId);
+  } else {
+    url.searchParams.delete("conversation");
+  }
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    const didCopy = document.execCommand("copy");
+    if (!didCopy) {
+      throw new Error("Copy command failed.");
+    }
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 export function ChatApp() {
   const [phoneNumber, setPhoneNumber] = useState("");
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
@@ -311,14 +364,27 @@ export function ChatApp() {
   const [isVerifyingPhoneOtp, setIsVerifyingPhoneOtp] = useState(false);
   const [phoneChangeMessage, setPhoneChangeMessage] = useState<string | null>(null);
   const [phoneChangeError, setPhoneChangeError] = useState<string | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<number, "up" | "down">>({});
+  const [regeneratingMessageId, setRegeneratingMessageId] = useState<number | null>(null);
+  const [forkingMessageId, setForkingMessageId] = useState<number | null>(null);
+  const [openMessageMenuId, setOpenMessageMenuId] = useState<number | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [pendingEditMessage, setPendingEditMessage] = useState<ChatMessage | null>(null);
+  const [isEditWarningOpen, setIsEditWarningOpen] = useState(false);
+  const [suppressEditWarning, setSuppressEditWarning] = useState(false);
+  const [shouldRememberEditWarningChoice, setShouldRememberEditWarningChoice] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const chatScrollAreaRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const draftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const copiedMessageTimeoutRef = useRef<number | null>(null);
   const bottomStateFrameRef = useRef<number | null>(null);
   const contentNoticeFrameRef = useRef<number | null>(null);
   const hideJumpFrameRef = useRef<number | null>(null);
   const scrollFrameRef = useRef<number | null>(null);
+  const nextPendingMessageIdRef = useRef(-1);
   const isAtBottomRef = useRef(true);
   const previousMessagesKeyRef = useRef("");
   const skipNextContentNoticeRef = useRef(0);
@@ -354,6 +420,18 @@ export function ChatApp() {
         .join("\n") ?? "",
     [activeConversation?.messages],
   );
+  const lastPersistedMessage = useMemo(() => {
+    const messages = activeConversation?.messages ?? [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.id > 0 && message.content.trim()) {
+        return message;
+      }
+    }
+    return null;
+  }, [activeConversation?.messages]);
+  const latestAssistantMessageId =
+    lastPersistedMessage?.role === "assistant" ? lastPersistedMessage.id : null;
 
   const hideJumpToLatest = useCallback(() => {
     if (hideJumpFrameRef.current !== null) {
@@ -365,6 +443,12 @@ export function ChatApp() {
       setShowJumpToLatest(false);
     });
   }, []);
+
+  function getNextPendingMessageId() {
+    const id = nextPendingMessageIdRef.current;
+    nextPendingMessageIdRef.current -= 1;
+    return id;
+  }
 
   const updateBottomState = useCallback(() => {
     const scrollArea = chatScrollAreaRef.current;
@@ -447,6 +531,7 @@ export function ChatApp() {
     setActiveConversation(null);
     setIsComposingNewChat(false);
     setDraft("");
+    setCurrentConversationUrl(null);
     window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
     window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
   }, []);
@@ -483,6 +568,7 @@ export function ChatApp() {
       const refresh = window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
       const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
       const storedSystemInstruction = window.localStorage.getItem(SYSTEM_INSTRUCTION_STORAGE_KEY);
+      const storedEditWarningDisabled = window.localStorage.getItem(EDIT_WARNING_DISABLED_STORAGE_KEY);
 
       if (storedPhoneNumber) {
         setPhoneNumber(storedPhoneNumber);
@@ -499,6 +585,10 @@ export function ChatApp() {
 
       if (storedSystemInstruction !== null) {
         setSystemInstruction(storedSystemInstruction);
+      }
+
+      if (storedEditWarningDisabled === "true") {
+        setSuppressEditWarning(true);
       }
     }, 0);
 
@@ -657,6 +747,9 @@ export function ChatApp() {
       if (scrollFrameRef.current !== null) {
         window.cancelAnimationFrame(scrollFrameRef.current);
       }
+      if (copiedMessageTimeoutRef.current !== null) {
+        window.clearTimeout(copiedMessageTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -696,6 +789,22 @@ export function ChatApp() {
   }, [openConversationMenuId]);
 
   useEffect(() => {
+    if (openMessageMenuId === null) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest("[data-message-actions]")) {
+        setOpenMessageMenuId(null);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [openMessageMenuId]);
+
+  useEffect(() => {
     if (!authSession || isSendingRef.current) {
       return;
     }
@@ -723,11 +832,15 @@ export function ChatApp() {
           return;
         }
 
+        const linkedConversationId = getLinkedConversationId();
         const targetId =
-          items.find((item) => item.id === activeConversationId)?.id ?? items[0].id;
+          (linkedConversationId && items.find((item) => item.id === linkedConversationId)?.id) ||
+          items.find((item) => item.id === activeConversationId)?.id ||
+          items[0].id;
         const detail = await performAuthenticated((access) => getConversation(targetId, access));
         if (!isCancelled) {
           setActiveConversation(detail);
+          setCurrentConversationUrl(detail.id);
           scrollToLatest("auto");
         }
       } catch (err) {
@@ -935,6 +1048,7 @@ export function ChatApp() {
     setActiveConversation(null);
     setIsComposingNewChat(true);
     setOpenConversationMenuId(null);
+    setCurrentConversationUrl(null);
     setRenamingConversationId(null);
     setRenameDraft("");
   }
@@ -951,6 +1065,7 @@ export function ChatApp() {
       setActiveConversation(detail);
       setIsComposingNewChat(false);
       setOpenConversationMenuId(null);
+      setCurrentConversationUrl(detail.id);
       scrollToLatest("auto");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to open conversation.");
@@ -1056,16 +1171,17 @@ export function ChatApp() {
       }
 
       streamingConversationId = conversation.id;
-      const pendingIdSeed = Date.now();
       const createdAt = new Date().toISOString();
+      const pendingUserMessageId = getNextPendingMessageId();
+      const pendingAssistantDraftId = getNextPendingMessageId();
       const pendingUserMessage: ChatMessage = {
-        id: -pendingIdSeed,
+        id: pendingUserMessageId,
         role: "user",
         content: message,
         created_at: createdAt,
       };
       const pendingAssistantMessage: ChatMessage = {
-        id: -pendingIdSeed - 1,
+        id: pendingAssistantDraftId,
         role: "assistant",
         content: "",
         created_at: createdAt,
@@ -1078,6 +1194,7 @@ export function ChatApp() {
 
       setDraft("");
       setIsComposingNewChat(false);
+      setCurrentConversationUrl(conversation.id);
       hasScrolledForCurrentResponseRef.current = false;
       setActiveConversation(optimisticConversation);
       setConversations((prev) => {
@@ -1174,6 +1291,593 @@ export function ChatApp() {
         streamAbortControllerRef.current = null;
       }
     }
+  }
+
+  async function handleCopyMessage(message: ChatMessage) {
+    if (!message.content.trim()) {
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(message.content);
+      setOpenMessageMenuId(null);
+      setCopiedMessageId(message.id);
+      if (copiedMessageTimeoutRef.current !== null) {
+        window.clearTimeout(copiedMessageTimeoutRef.current);
+      }
+      copiedMessageTimeoutRef.current = window.setTimeout(() => {
+        setCopiedMessageId((currentId) => (currentId === message.id ? null : currentId));
+        copiedMessageTimeoutRef.current = null;
+      }, 1500);
+    } catch {
+      setError("Could not copy message.");
+    }
+  }
+
+  function handleToggleFeedback(messageId: number, value: "up" | "down") {
+    setFeedbackByMessageId((prev) => {
+      const next = { ...prev };
+      if (next[messageId] === value) {
+        delete next[messageId];
+      } else {
+        next[messageId] = value;
+      }
+      return next;
+    });
+  }
+
+  async function handleRegenerateMessage(message: ChatMessage) {
+    if (
+      !authSession ||
+      !activeConversation ||
+      isSending ||
+      message.role !== "assistant" ||
+      message.id < 0 ||
+      message.id !== latestAssistantMessageId
+    ) {
+      return;
+    }
+
+    const targetIndex = activeConversation.messages.findIndex((item) => item.id === message.id);
+    if (targetIndex < 0) {
+      return;
+    }
+
+    const originalConversation = activeConversation;
+    const abortController = new AbortController();
+    const pendingAssistantMessage: ChatMessage = {
+      id: getNextPendingMessageId(),
+      role: "assistant",
+      content: "",
+      created_at: new Date().toISOString(),
+    };
+    const pendingAssistantMessageId = pendingAssistantMessage.id;
+    let didReceiveStreamEvent = false;
+
+    setIsSending(true);
+    setRegeneratingMessageId(message.id);
+    setOpenMessageMenuId(null);
+    setError(null);
+    streamAbortControllerRef.current = abortController;
+    hasScrolledForCurrentResponseRef.current = false;
+
+    const optimisticConversation: ConversationDetail = {
+      ...activeConversation,
+      messages: [...activeConversation.messages.slice(0, targetIndex), pendingAssistantMessage],
+    };
+
+    setActiveConversation(optimisticConversation);
+    setConversations((prev) => {
+      const rest = prev.filter((item) => item.id !== optimisticConversation.id);
+      return [toConversationSummary(optimisticConversation), ...rest];
+    });
+    scrollToLatestForNewContent("smooth");
+
+    try {
+      await performAuthenticated((access) =>
+        streamRegenerateMessage(
+          originalConversation.id,
+          message.id,
+          access,
+          {
+            model: selectedModel,
+            system_instruction: systemInstruction.trim() || undefined,
+          },
+          (streamEvent) => {
+            didReceiveStreamEvent = true;
+
+            if (streamEvent.type === "conversation") {
+              setActiveConversation((prev) => {
+                if (prev?.id !== originalConversation.id) {
+                  return prev;
+                }
+
+                const pendingAssistant = prev.messages.find(
+                  (item) => item.id === pendingAssistantMessageId,
+                );
+                return {
+                  ...streamEvent.conversation,
+                  messages: pendingAssistant
+                    ? [...streamEvent.conversation.messages, pendingAssistant]
+                    : streamEvent.conversation.messages,
+                };
+              });
+              setConversations((prev) => {
+                const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
+                return [toConversationSummary(streamEvent.conversation), ...rest];
+              });
+              return;
+            }
+
+            if (streamEvent.type === "delta") {
+              if (!hasScrolledForCurrentResponseRef.current) {
+                hasScrolledForCurrentResponseRef.current = true;
+                scrollToLatestForNewContent("smooth");
+              }
+
+              setActiveConversation((prev) =>
+                prev?.id === originalConversation.id
+                  ? {
+                      ...prev,
+                      messages: prev.messages.map((item) =>
+                        item.id === pendingAssistantMessageId
+                          ? { ...item, content: item.content + streamEvent.delta }
+                          : item,
+                      ),
+                    }
+                  : prev,
+              );
+              return;
+            }
+
+            if (streamEvent.type === "done") {
+              setActiveConversation(streamEvent.conversation);
+              setConversations((prev) => {
+                const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
+                return [toConversationSummary(streamEvent.conversation), ...rest];
+              });
+            }
+          },
+          abortController.signal,
+        ),
+      );
+    } catch (err) {
+      setActiveConversation((prev) => {
+        if (prev?.id !== originalConversation.id) {
+          return prev;
+        }
+
+        if (!didReceiveStreamEvent) {
+          return originalConversation;
+        }
+
+        return {
+          ...prev,
+          messages: prev.messages.filter(
+            (item) => item.id !== pendingAssistantMessageId || item.content.trim(),
+          ),
+        };
+      });
+
+      if (!isAbortError(err)) {
+        setError(err instanceof Error ? err.message : "Failed to regenerate response.");
+      }
+    } finally {
+      setIsSending(false);
+      setRegeneratingMessageId(null);
+      if (streamAbortControllerRef.current === abortController) {
+        streamAbortControllerRef.current = null;
+      }
+    }
+  }
+
+  function startEditMessage(message: ChatMessage) {
+    if (message.role !== "user" || message.id < 0 || isSending) {
+      return;
+    }
+
+    setEditingMessageId(message.id);
+    setEditDraft(message.content);
+    setOpenMessageMenuId(null);
+    setError(null);
+  }
+
+  function cancelEditMessage() {
+    setEditingMessageId(null);
+    setEditDraft("");
+    setPendingEditMessage(null);
+    setIsEditWarningOpen(false);
+    setShouldRememberEditWarningChoice(false);
+  }
+
+  function messageHasLaterConversation(message: ChatMessage) {
+    const messages = activeConversation?.messages ?? [];
+    const index = messages.findIndex((item) => item.id === message.id);
+    return index >= 0 && index < messages.length - 1;
+  }
+
+  function handleEditSubmit(message: ChatMessage) {
+    const content = editDraft.trim();
+    if (!content || message.role !== "user" || message.id < 0 || isSending) {
+      return;
+    }
+
+    if (messageHasLaterConversation(message) && !suppressEditWarning) {
+      setPendingEditMessage(message);
+      setIsEditWarningOpen(true);
+      setShouldRememberEditWarningChoice(false);
+      return;
+    }
+
+    void submitEditedMessage(message, content);
+  }
+
+  function handleConfirmEditWarning() {
+    const message = pendingEditMessage;
+    const content = editDraft.trim();
+    if (!message || !content) {
+      cancelEditMessage();
+      return;
+    }
+
+    if (shouldRememberEditWarningChoice) {
+      setSuppressEditWarning(true);
+      window.localStorage.setItem(EDIT_WARNING_DISABLED_STORAGE_KEY, "true");
+    }
+
+    setPendingEditMessage(null);
+    setIsEditWarningOpen(false);
+    setShouldRememberEditWarningChoice(false);
+    void submitEditedMessage(message, content);
+  }
+
+  async function submitEditedMessage(message: ChatMessage, content: string) {
+    if (!authSession || !activeConversation || message.role !== "user" || message.id < 0 || isSending) {
+      return;
+    }
+
+    const targetIndex = activeConversation.messages.findIndex((item) => item.id === message.id);
+    if (targetIndex < 0) {
+      return;
+    }
+
+    const originalConversation = activeConversation;
+    const abortController = new AbortController();
+    const editedUserMessage: ChatMessage = {
+      ...message,
+      content,
+    };
+    const pendingAssistantMessage: ChatMessage = {
+      id: getNextPendingMessageId(),
+      role: "assistant",
+      content: "",
+      created_at: new Date().toISOString(),
+    };
+    const pendingAssistantMessageId = pendingAssistantMessage.id;
+    let didReceiveStreamEvent = false;
+
+    setIsSending(true);
+    setError(null);
+    setEditingMessageId(null);
+    setEditDraft("");
+    streamAbortControllerRef.current = abortController;
+    hasScrolledForCurrentResponseRef.current = false;
+
+    const optimisticConversation: ConversationDetail = {
+      ...activeConversation,
+      messages: [
+        ...activeConversation.messages.slice(0, targetIndex),
+        editedUserMessage,
+        pendingAssistantMessage,
+      ],
+    };
+
+    setActiveConversation(optimisticConversation);
+    setConversations((prev) => {
+      const rest = prev.filter((item) => item.id !== optimisticConversation.id);
+      return [toConversationSummary(optimisticConversation), ...rest];
+    });
+    scrollToLatestForNewContent("smooth");
+
+    try {
+      await performAuthenticated((access) =>
+        streamEditMessage(
+          originalConversation.id,
+          message.id,
+          access,
+          {
+            content,
+            model: selectedModel,
+            system_instruction: systemInstruction.trim() || undefined,
+          },
+          (streamEvent) => {
+            didReceiveStreamEvent = true;
+
+            if (streamEvent.type === "conversation") {
+              setActiveConversation((prev) => {
+                if (prev?.id !== originalConversation.id) {
+                  return prev;
+                }
+
+                const pendingAssistant = prev.messages.find(
+                  (item) => item.id === pendingAssistantMessageId,
+                );
+                return {
+                  ...streamEvent.conversation,
+                  messages: pendingAssistant
+                    ? [...streamEvent.conversation.messages, pendingAssistant]
+                    : streamEvent.conversation.messages,
+                };
+              });
+              setConversations((prev) => {
+                const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
+                return [toConversationSummary(streamEvent.conversation), ...rest];
+              });
+              return;
+            }
+
+            if (streamEvent.type === "delta") {
+              if (!hasScrolledForCurrentResponseRef.current) {
+                hasScrolledForCurrentResponseRef.current = true;
+                scrollToLatestForNewContent("smooth");
+              }
+
+              setActiveConversation((prev) =>
+                prev?.id === originalConversation.id
+                  ? {
+                      ...prev,
+                      messages: prev.messages.map((item) =>
+                        item.id === pendingAssistantMessageId
+                          ? { ...item, content: item.content + streamEvent.delta }
+                          : item,
+                      ),
+                    }
+                  : prev,
+              );
+              return;
+            }
+
+            if (streamEvent.type === "done") {
+              setActiveConversation(streamEvent.conversation);
+              setConversations((prev) => {
+                const rest = prev.filter((item) => item.id !== streamEvent.conversation.id);
+                return [toConversationSummary(streamEvent.conversation), ...rest];
+              });
+            }
+          },
+          abortController.signal,
+        ),
+      );
+    } catch (err) {
+      setActiveConversation((prev) => {
+        if (prev?.id !== originalConversation.id) {
+          return prev;
+        }
+
+        if (!didReceiveStreamEvent) {
+          return originalConversation;
+        }
+
+        return {
+          ...prev,
+          messages: prev.messages.filter(
+            (item) => item.id !== pendingAssistantMessageId || item.content.trim(),
+          ),
+        };
+      });
+
+      if (!isAbortError(err)) {
+        setError(err instanceof Error ? err.message : "Failed to edit message.");
+      }
+    } finally {
+      setIsSending(false);
+      if (streamAbortControllerRef.current === abortController) {
+        streamAbortControllerRef.current = null;
+      }
+    }
+  }
+
+  async function handleForkMessage(message: ChatMessage) {
+    if (
+      !authSession ||
+      !activeConversation ||
+      message.role !== "assistant" ||
+      message.id < 0 ||
+      forkingMessageId !== null
+    ) {
+      return;
+    }
+
+    setForkingMessageId(message.id);
+    setOpenMessageMenuId(null);
+    setError(null);
+    const forkTab = window.open("about:blank", "_blank");
+
+    try {
+      const forkedConversation = await performAuthenticated((access) =>
+        forkConversationFromMessage(activeConversation.id, message.id, access),
+      );
+
+      setConversations((prev) => {
+        const rest = prev.filter((item) => item.id !== forkedConversation.id);
+        return [toConversationSummary(forkedConversation), ...rest];
+      });
+
+      if (forkTab) {
+        forkTab.location.replace(buildConversationUrl(forkedConversation.id));
+      } else {
+        setError("Your browser blocked the new tab. Allow pop-ups and try forking again.");
+      }
+    } catch (err) {
+      forkTab?.close();
+      setError(err instanceof Error ? err.message : "Failed to fork chat.");
+    } finally {
+      setForkingMessageId(null);
+    }
+  }
+
+  function renderMessageActions(message: ChatMessage) {
+    if (!message.content.trim()) {
+      return null;
+    }
+
+    const feedback = feedbackByMessageId[message.id];
+    const isAssistant = message.role === "assistant";
+    const isCopied = copiedMessageId === message.id;
+    const isRegenerating = regeneratingMessageId === message.id;
+    const isForking = forkingMessageId === message.id;
+    const canRegenerate = isAssistant && message.id === latestAssistantMessageId;
+    const canFork = isAssistant && message.id > 0;
+    const canEdit = message.role === "user" && message.id > 0 && !isSending;
+    const actionButtonClass = cn(
+      "grid h-8 w-8 place-items-center rounded-lg transition disabled:cursor-not-allowed disabled:opacity-50",
+      isDark
+        ? "text-[#d7d7d7] hover:bg-[#2f2f2f] hover:text-[#f4f4f4]"
+        : "text-[#555555] hover:bg-[#f1f1f1] hover:text-[#171717]",
+    );
+    const selectedFeedbackClass = isDark ? "text-[#f4f4f4]" : "text-[#171717]";
+
+    return (
+      <div
+        data-message-actions
+        dir="ltr"
+        className={cn(
+          "relative mt-2 flex items-center gap-1",
+          message.role === "user" ? "justify-end" : "justify-start",
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => void handleCopyMessage(message)}
+          className={actionButtonClass}
+          title={isCopied ? "Copied" : "Copy"}
+          aria-label={isCopied ? "Message copied" : "Copy message"}
+        >
+          {isCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+        </button>
+
+        {canEdit ? (
+          <button
+            type="button"
+            onClick={() => startEditMessage(message)}
+            className={actionButtonClass}
+            title="Edit message"
+            aria-label="Edit message"
+          >
+            <Pencil className="h-4 w-4" />
+          </button>
+        ) : null}
+
+        {isAssistant ? (
+          <>
+            <button
+              type="button"
+              onClick={() => handleToggleFeedback(message.id, "up")}
+              className={cn(actionButtonClass, feedback === "up" ? selectedFeedbackClass : "")}
+              title="Good response"
+              aria-label="Good response"
+              aria-pressed={feedback === "up"}
+            >
+              <ThumbsUp className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleToggleFeedback(message.id, "down")}
+              className={cn(actionButtonClass, feedback === "down" ? selectedFeedbackClass : "")}
+              title="Bad response"
+              aria-label="Bad response"
+              aria-pressed={feedback === "down"}
+            >
+              <ThumbsDown className="h-4 w-4" />
+            </button>
+            {canRegenerate ? (
+              <button
+                type="button"
+                onClick={() => void handleRegenerateMessage(message)}
+                disabled={isSending || message.id < 0}
+                className={actionButtonClass}
+                title="Try again"
+                aria-label="Try again"
+              >
+                <RotateCcw className={cn("h-4 w-4", isRegenerating ? "animate-spin" : "")} />
+              </button>
+            ) : null}
+            {canFork ? (
+              <button
+                type="button"
+                onClick={() => void handleForkMessage(message)}
+                disabled={forkingMessageId !== null}
+                className={actionButtonClass}
+                title="Fork chat"
+                aria-label="Fork chat"
+              >
+                <GitFork className={cn("h-4 w-4", isForking ? "animate-spin" : "")} />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setOpenMessageMenuId((currentId) => (currentId === message.id ? null : message.id))}
+              className={actionButtonClass}
+              title="More"
+              aria-label="More message actions"
+              aria-expanded={openMessageMenuId === message.id}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </button>
+            {openMessageMenuId === message.id ? (
+              <div
+                className={cn(
+                  "absolute left-0 top-9 z-50 w-44 rounded-lg border p-1 text-sm shadow-xl",
+                  isDark
+                    ? "border-[#3a3a3a] bg-[#2f2f2f] text-[#ececec]"
+                    : "border-[#dedede] bg-white text-[#171717]",
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={() => void handleCopyMessage(message)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-start transition",
+                    isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+                  )}
+                >
+                  {isCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  <span>{isCopied ? "Copied" : "Copy"}</span>
+                </button>
+                {canRegenerate ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleRegenerateMessage(message)}
+                    disabled={isSending || message.id < 0}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-2 text-start transition disabled:cursor-not-allowed disabled:opacity-50",
+                      isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+                    )}
+                  >
+                    <RotateCcw className={cn("h-4 w-4", isRegenerating ? "animate-spin" : "")} />
+                    <span>Try again</span>
+                  </button>
+                ) : null}
+                {canFork ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleForkMessage(message)}
+                    disabled={forkingMessageId !== null}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-2 text-start transition disabled:cursor-not-allowed disabled:opacity-50",
+                      isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+                    )}
+                  >
+                    <GitFork className={cn("h-4 w-4", isForking ? "animate-spin" : "")} />
+                    <span>Fork chat</span>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+    );
   }
 
   async function handleRequestOtp(event: React.FormEvent) {
@@ -1839,6 +2543,87 @@ export function ChatApp() {
     );
   }
 
+  function renderEditWarningModal() {
+    if (!isEditWarningOpen || !pendingEditMessage) {
+      return null;
+    }
+
+    return (
+      <div className="fixed inset-0 z-[90] flex items-center justify-center px-4 py-6">
+        <button
+          type="button"
+          className="absolute inset-0 bg-black/70 backdrop-blur-[1px]"
+          aria-label="Cancel message edit"
+          onClick={() => {
+            setPendingEditMessage(null);
+            setIsEditWarningOpen(false);
+            setShouldRememberEditWarningChoice(false);
+          }}
+        />
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm message edit"
+          className={cn(
+            "relative w-full max-w-[440px] rounded-2xl border p-5 shadow-2xl",
+            isDark
+              ? "border-[#3a3a3a] bg-[#212121] text-[#f4f4f4]"
+              : "border-[#dedede] bg-white text-[#171717]",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-flex h-7 items-center rounded-full px-3 text-xs font-medium",
+              isDark ? "bg-[#303030] text-[#d1d1d1]" : "bg-[#f1f1f1] text-[#5f5f5f]",
+            )}
+          >
+            Message edit
+          </span>
+          <h2 className="mt-4 text-lg font-medium">Replace this point in the conversation?</h2>
+          <p className={cn("mt-2 text-sm leading-6", isDark ? "text-[#c5c5c5]" : "text-[#5f5f5f]")}>
+            Sending this edit will remove the replies and follow-up messages after this request, then generate a
+            fresh response from your revised message.
+          </p>
+          <label className="mt-4 flex items-center gap-3 text-sm">
+            <input
+              type="checkbox"
+              checked={shouldRememberEditWarningChoice}
+              onChange={(event) => setShouldRememberEditWarningChoice(event.target.checked)}
+              className="h-4 w-4 accent-[#10a37f]"
+            />
+            <span>Don&apos;t warn me before replacing later messages again.</span>
+          </label>
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setPendingEditMessage(null);
+                setIsEditWarningOpen(false);
+                setShouldRememberEditWarningChoice(false);
+              }}
+              className={cn(
+                "h-10 rounded-full px-4 text-sm font-medium transition",
+                isDark ? "bg-black text-white hover:bg-[#171717]" : "bg-[#e5e5e5] text-[#171717] hover:bg-[#d7d7d7]",
+              )}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmEditWarning}
+              className={cn(
+                "h-10 rounded-full px-5 text-sm font-medium transition",
+                isDark ? "bg-white text-black hover:bg-[#e7e7e7]" : "bg-[#171717] text-white hover:bg-[#303030]",
+              )}
+            >
+              Send edit
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <SidebarProvider
       open={isSidebarOpen}
@@ -2292,38 +3077,95 @@ export function ChatApp() {
                           ) : null}
 
                           <div
-                            dir="auto"
                             className={cn(
-                              "max-w-[82%] text-[15px] leading-7",
-                              message.role === "user"
-                                ? isDark
-                                  ? "rounded-3xl bg-[#303030] px-5 py-3"
-                                  : "rounded-3xl bg-[#f4f4f4] px-5 py-3"
-                                : "",
-                          )}
-                        >
-                            <div className="chat-message-content" dir="auto">
-                              {message.content ? (
-                                <ChatMessageRenderer content={message.content} />
-                              ) : null}
-                              {message.role === "assistant" && message.id < 0 && !message.content ? (
-                                <span
+                              "flex max-w-[82%] flex-col",
+                              editingMessageId === message.id ? "w-full max-w-[704px]" : "",
+                              message.role === "user" ? "items-end" : "items-start",
+                            )}
+                          >
+                            {editingMessageId === message.id && message.role === "user" ? (
+                              <div
+                                className={cn(
+                                  "w-full rounded-[28px] px-5 py-4",
+                                  isDark ? "bg-[#303030]" : "bg-[#f4f4f4]",
+                                )}
+                              >
+                                <textarea
+                                  value={editDraft}
+                                  onChange={(event) => setEditDraft(event.target.value)}
                                   dir="auto"
-                                  className={cn(isDark ? "text-[#a8a8a8]" : "text-[#6f6f6f]")}
-                                >
-                                  Thinking...
-                                </span>
-                              ) : null}
-                            </div>
-                            <div
-                              dir="ltr"
-                              className={cn(
-                                "mt-1 text-start text-xs",
-                                isDark ? "text-[#8f8f8f]" : "text-[#8a8a8a]",
-                              )}
-                            >
-                              {formatTime(message.created_at)}
-                            </div>
+                                  autoFocus
+                                  rows={Math.min(8, Math.max(2, editDraft.split("\n").length))}
+                                  className={cn(
+                                    "min-h-20 w-full resize-none bg-transparent text-[15px] leading-7 outline-none",
+                                    isDark ? "text-[#f4f4f4]" : "text-[#171717]",
+                                  )}
+                                  onKeyDown={(event) => {
+                                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                                      event.preventDefault();
+                                      handleEditSubmit(message);
+                                    }
+                                    if (event.key === "Escape") {
+                                      cancelEditMessage();
+                                    }
+                                  }}
+                                />
+                                <div className="mt-4 flex justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={cancelEditMessage}
+                                    className={cn(
+                                      "h-10 rounded-full px-4 text-sm font-medium transition",
+                                      isDark
+                                        ? "bg-black text-white hover:bg-[#171717]"
+                                        : "bg-[#e5e5e5] text-[#171717] hover:bg-[#d7d7d7]",
+                                    )}
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleEditSubmit(message)}
+                                    disabled={!editDraft.trim() || isSending}
+                                    className={cn(
+                                      "h-10 rounded-full px-5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
+                                      isDark
+                                        ? "bg-white text-black hover:bg-[#e7e7e7]"
+                                        : "bg-[#171717] text-white hover:bg-[#303030]",
+                                    )}
+                                  >
+                                    Send
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div
+                                dir="auto"
+                                className={cn(
+                                  "text-[15px] leading-7",
+                                  message.role === "user"
+                                    ? isDark
+                                      ? "rounded-3xl bg-[#303030] px-5 py-3"
+                                      : "rounded-3xl bg-[#f4f4f4] px-5 py-3"
+                                    : "",
+                                )}
+                              >
+                                <div className="chat-message-content" dir="auto">
+                                {message.content ? (
+                                  <ChatMessageRenderer content={message.content} />
+                                ) : null}
+                                {message.role === "assistant" && message.id < 0 && !message.content ? (
+                                  <span
+                                    dir="auto"
+                                    className={cn(isDark ? "text-[#a8a8a8]" : "text-[#6f6f6f]")}
+                                  >
+                                    Thinking...
+                                  </span>
+                                ) : null}
+                                </div>
+                              </div>
+                            )}
+                            {editingMessageId !== message.id ? renderMessageActions(message) : null}
                           </div>
                         </div>
                       ))}
@@ -2449,6 +3291,7 @@ export function ChatApp() {
           ) : null}
         </SidebarInset>
         {renderAccountModal()}
+        {renderEditWarningModal()}
     </SidebarProvider>
   );
 }

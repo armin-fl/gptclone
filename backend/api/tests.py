@@ -207,11 +207,29 @@ class ConversationAuthorizationTests(TestCase):
             {"content": "Hello"},
             format="json",
         )
+        regenerate_response = self.client.post(
+            f"/api/conversations/{conversation_id}/messages/1/regenerate/",
+            {"stream": True},
+            format="json",
+        )
+        fork_response = self.client.post(
+            f"/api/conversations/{conversation_id}/messages/1/fork/",
+            {},
+            format="json",
+        )
+        edit_response = self.client.post(
+            f"/api/conversations/{conversation_id}/messages/1/edit/",
+            {"content": "Edited", "stream": True},
+            format="json",
+        )
 
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.data, [])
         self.assertEqual(detail_response.status_code, 404)
         self.assertEqual(send_response.status_code, 404)
+        self.assertEqual(regenerate_response.status_code, 404)
+        self.assertEqual(fork_response.status_code, 404)
+        self.assertEqual(edit_response.status_code, 404)
 
     def test_conversation_can_be_renamed_pinned_and_deleted_by_owner(self):
         self.authenticate(self.user)
@@ -281,3 +299,206 @@ class ConversationAuthorizationTests(TestCase):
                 content="Hello stream",
             ).exists()
         )
+
+    @patch("api.views.stream_vllm_chat")
+    def test_regenerate_latest_assistant_replaces_only_that_response(self, mock_stream_vllm_chat):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user)
+        first_user = Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Explain this",
+        )
+        latest_assistant = Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="Old answer",
+        )
+        mock_stream_vllm_chat.return_value = ["New", " answer"]
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/{latest_assistant.id}/regenerate/",
+            {"stream": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = b"".join(response.streaming_content).decode("utf-8")
+        events = [json.loads(line) for line in body.splitlines()]
+
+        self.assertEqual([event["type"] for event in events], ["conversation", "delta", "delta", "done"])
+        self.assertEqual([message["content"] for message in events[0]["conversation"]["messages"]], ["Explain this"])
+        self.assertEqual(events[3]["conversation"]["messages"][-1]["content"], "New answer")
+
+        stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
+        self.assertEqual([message.content for message in stored_messages], ["Explain this", "New answer"])
+        self.assertEqual(stored_messages[0].id, first_user.id)
+
+    @patch("api.views.stream_vllm_chat")
+    def test_regenerate_rejects_non_latest_assistant_without_deleting_messages(self, mock_stream_vllm_chat):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user)
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Explain this",
+        )
+        old_assistant = Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="Old answer",
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Follow-up",
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="Latest answer",
+        )
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/{old_assistant.id}/regenerate/",
+            {"stream": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Only the latest assistant message", response.data["detail"])
+        mock_stream_vllm_chat.assert_not_called()
+
+        stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
+        self.assertEqual(
+            [message.content for message in stored_messages],
+            ["Explain this", "Old answer", "Follow-up", "Latest answer"],
+        )
+
+    def test_fork_message_creates_new_conversation_through_target_message(self):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user, title="Original chat")
+        first_user = Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Start",
+        )
+        target_assistant = Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="Branch point",
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Do not copy",
+        )
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/{target_assistant.id}/fork/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertNotEqual(response.data["id"], str(conversation.id))
+        self.assertEqual(response.data["title"], "Original chat (fork)")
+        self.assertEqual(
+            [message["content"] for message in response.data["messages"]],
+            ["Start", "Branch point"],
+        )
+
+        self.assertEqual(Message.objects.filter(conversation=conversation).count(), 3)
+        forked_conversation = Conversation.objects.get(id=response.data["id"])
+        forked_messages = list(Message.objects.filter(conversation=forked_conversation).order_by("created_at", "id"))
+        self.assertEqual([message.content for message in forked_messages], ["Start", "Branch point"])
+        self.assertNotEqual(forked_messages[0].id, first_user.id)
+
+    def test_fork_rejects_user_request(self):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user)
+        user_message = Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Start",
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="Answer",
+        )
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/{user_message.id}/fork/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Only assistant responses can be forked.")
+        self.assertEqual(Conversation.objects.count(), 1)
+
+    @patch("api.views.stream_vllm_chat")
+    def test_edit_user_request_replaces_tail_and_streams_new_response(self, mock_stream_vllm_chat):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user, title="Original chat")
+        edited_user = Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Old question",
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="Old answer",
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Later question",
+        )
+        mock_stream_vllm_chat.return_value = ["New", " answer"]
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/{edited_user.id}/edit/",
+            {"content": "Edited question", "stream": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = b"".join(response.streaming_content).decode("utf-8")
+        events = [json.loads(line) for line in body.splitlines()]
+
+        self.assertEqual([event["type"] for event in events], ["conversation", "delta", "delta", "done"])
+        self.assertEqual([message["content"] for message in events[0]["conversation"]["messages"]], ["Edited question"])
+        self.assertEqual(events[3]["conversation"]["messages"][-1]["content"], "New answer")
+
+        stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
+        self.assertEqual([message.content for message in stored_messages], ["Edited question", "New answer"])
+
+    @patch("api.views.stream_vllm_chat")
+    def test_edit_rejects_assistant_response_without_deleting_messages(self, mock_stream_vllm_chat):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user)
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="Question",
+        )
+        assistant_message = Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="Answer",
+        )
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/{assistant_message.id}/edit/",
+            {"content": "Edited", "stream": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Only user requests can be edited.")
+        mock_stream_vllm_chat.assert_not_called()
+        stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
+        self.assertEqual([message.content for message in stored_messages], ["Question", "Answer"])
