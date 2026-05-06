@@ -107,6 +107,17 @@ services:
       timeout: 10s
       retries: 10
 
+
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: redis_insight
+    depends_on:
+      - app-redis
+    ports:
+      - "5540:5540"
+    restart: always
+
+
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3
     container_name: vllm-langfuse-worker-dev

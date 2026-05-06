@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
@@ -308,6 +309,11 @@ function buildConversationUrl(conversationId: string): string {
   url.searchParams.set("conversation", conversationId);
   url.hash = "";
   return url.toString();
+}
+
+function getConversationHref(conversationId: string): string {
+  const search = new URLSearchParams({ conversation: conversationId });
+  return `/?${search.toString()}`;
 }
 
 function setCurrentConversationUrl(conversationId: string | null) {
@@ -2120,11 +2126,17 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                 </button>
               </form>
             ) : (
-              <button
-                type="button"
-                onClick={() => void handleSelectConversation(conversation.id)}
+              <Link
+                href={getConversationHref(conversation.id)}
+                onClick={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+                    return;
+                  }
+                  event.preventDefault();
+                  void handleSelectConversation(conversation.id);
+                }}
                 className={cn(
-                  "group flex h-9 w-full items-center gap-2 rounded-lg px-3 text-start text-sm transition",
+                  "group flex h-9 w-full cursor-pointer items-center gap-2 rounded-lg px-3 text-start text-sm transition",
                   activeConversationId === conversation.id
                     ? isDark
                       ? "bg-[#303030] text-[#ececec]"
@@ -2140,7 +2152,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                   <MessageSquare className="h-4 w-4 shrink-0 opacity-70" />
                 )}
                 <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
-              </button>
+              </Link>
             )}
 
             {renamingConversationId !== conversation.id ? (
@@ -2324,7 +2336,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
           aria-modal="true"
           aria-label="Account settings"
           className={cn(
-            "relative grid h-[min(600px,92vh)] w-full max-w-[680px] grid-cols-[196px_minmax(0,1fr)] overflow-hidden rounded-2xl border text-[14px] shadow-2xl",
+            "relative grid h-[min(600px,92vh)] w-full max-w-[680px] grid-cols-[196px_minmax(0,1fr)] overflow-hidden rounded-2xl border text-sm shadow-2xl",
             modalIsDark
               ? "border-[#2f2f2f] bg-[#212121] text-[#f4f4f4]"
               : "border-[#d9d9d9] bg-white text-[#171717]",
@@ -2748,18 +2760,30 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
           </div>
 
           <div className="space-y-2 px-3 pb-3">
-            <button
-              type="button"
-              onClick={handleCreateConversation}
-              disabled={!isAuthenticated}
+            <Link
+              href="/"
+              aria-disabled={!isAuthenticated}
+              onClick={(event) => {
+                if (!isAuthenticated) {
+                  event.preventDefault();
+                  setError("Sign in first.");
+                  return;
+                }
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+                  return;
+                }
+                event.preventDefault();
+                handleCreateConversation();
+              }}
               className={cn(
-                "flex h-10 w-full items-center gap-3 rounded-lg px-3 text-start text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
+                "group flex h-9 w-full items-center gap-2 rounded-lg px-3 text-start text-sm transition",
+                isAuthenticated ? "cursor-pointer" : "cursor-not-allowed opacity-50",
                 isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#ececec]",
               )}
             >
-              <SquarePen className="h-5 w-5" />
+              <SquarePen className="h-4 w-4 shrink-0 opacity-70" />
               <span>New chat</span>
-            </button>
+            </Link>
 
             <div
               className={cn(
@@ -3190,7 +3214,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                                   autoFocus
                                   rows={Math.min(8, Math.max(2, editDraft.split("\n").length))}
                                   className={cn(
-                                    "min-h-20 w-full resize-none bg-transparent text-[15px] leading-7 outline-none",
+                                    "min-h-20 w-full resize-none bg-transparent text-base leading-7 outline-none",
                                     isDark ? "text-[#f4f4f4]" : "text-[#171717]",
                                   )}
                                   onKeyDown={(event) => {
@@ -3235,7 +3259,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                               <div
                                 dir="auto"
                                 className={cn(
-                                  "text-[15px] leading-7",
+                                  "text-base leading-7",
                                   message.role === "user"
                                     ? isDark
                                       ? "rounded-3xl bg-[#303030] px-5 py-3"
@@ -3318,7 +3342,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                   placeholder="Ask anything"
                   dir="auto"
                   className={cn(
-                    "!min-h-9 max-h-44 resize-none overflow-hidden !rounded-none !border-0 !bg-transparent !px-0 !py-2 text-[15px] leading-6 !shadow-none outline-none focus-visible:!ring-0",
+                    "!min-h-9 max-h-44 resize-none overflow-hidden !rounded-none !border-0 !bg-transparent !px-0 !py-2 text-base leading-6 !shadow-none outline-none focus-visible:!ring-0",
                     isDark
                       ? "!text-[#f4f4f4] !placeholder:text-[#c5c5c5]"
                       : "!text-[#171717] !placeholder:text-[#6b6b6b]",
