@@ -31,6 +31,18 @@ export interface CursorPage<T> {
 
 export type ConversationPage = CursorPage<Conversation>;
 
+export interface LlmModelStatus {
+  id: string;
+  label: string;
+  provider: string;
+  available: boolean;
+  reason?: string;
+}
+
+export interface LlmModelsResponse {
+  models: LlmModelStatus[];
+}
+
 export interface InitialChatData {
   user: AuthUser | null;
   conversations: ConversationPage;

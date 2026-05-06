@@ -1,7 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
+
+import requests
 from django.conf import settings
+from django.core.cache import cache
 from langfuse import propagate_attributes
 from langfuse.openai import OpenAI as LangfuseOpenAI
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAIError
+from requests import RequestException
 
 
 class UnsupportedLlmModelError(RuntimeError):
@@ -43,6 +48,81 @@ def get_llm_model_config(model: str) -> dict:
         raise UnsupportedLlmModelError(
             f"Unsupported LLM model '{model}'. Available models: {available_models}."
         ) from exc
+
+
+def _model_status_cache_key(model: str) -> str:
+    return f"llm:model-status:{model}"
+
+
+def _provider_api_key(provider: str) -> str:
+    if provider == "vllm":
+        return settings.VLLM_API_KEY
+    if provider == "ollama":
+        return settings.OLLAMA_API_KEY
+    return ""
+
+
+def _model_is_listed(model: str, payload: dict) -> bool:
+    model_items = payload.get("data")
+    if not isinstance(model_items, list):
+        return True
+    model_ids = {
+        item.get("id")
+        for item in model_items
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    return not model_ids or model in model_ids
+
+
+def get_llm_model_status(model: str) -> dict:
+    cached = cache.get(_model_status_cache_key(model))
+    if cached is not None:
+        return cached
+
+    try:
+        config = get_llm_model_config(model)
+        provider = str(config.get("provider", ""))
+        base_url = str(config["base_url"]).rstrip("/")
+        api_key = _provider_api_key(provider)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        response = requests.get(
+            f"{base_url}/models",
+            headers=headers,
+            timeout=settings.LLM_MODEL_HEALTH_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+
+        is_available = True
+        reason = ""
+        try:
+            is_available = _model_is_listed(model, response.json())
+            if not is_available:
+                reason = "Model server is running, but this model is not served."
+        except ValueError:
+            pass
+    except (UnsupportedLlmModelError, KeyError, RequestException) as exc:
+        is_available = False
+        reason = str(exc)
+
+    status = {
+        "id": model,
+        "label": str(settings.LLM_MODELS.get(model, {}).get("label", model)),
+        "provider": str(settings.LLM_MODELS.get(model, {}).get("provider", "")),
+        "available": is_available,
+        "reason": reason,
+    }
+    cache.set(_model_status_cache_key(model), status, settings.LLM_MODEL_HEALTH_CACHE_SECONDS)
+    return status
+
+
+def get_llm_model_statuses() -> list[dict]:
+    models = get_available_llm_models()
+    if not models:
+        return []
+
+    with ThreadPoolExecutor(max_workers=min(len(models), 8)) as executor:
+        statuses_by_model = dict(zip(models, executor.map(get_llm_model_status, models)))
+    return [statuses_by_model[model] for model in models]
 
 
 def get_available_vllm_models() -> list[str]:
@@ -157,6 +237,12 @@ def _get_assistant_delta(chunk) -> str:
     return str(content)
 
 
+def _chat_completion_options() -> dict:
+    return {
+        "max_tokens": settings.LLM_MAX_COMPLETION_TOKENS,
+    }
+
+
 # Flow 5: called by the view with prepared messages; traces, calls vLLM, then returns assistant text.
 def request_vllm_chat(
     *,
@@ -181,6 +267,7 @@ def request_vllm_chat(
                 model=model,
                 messages=messages,
                 stream=False,
+                **_chat_completion_options(),
             )
     except OpenAIError as exc:
         raise _format_vllm_error(exc, endpoint) from exc
@@ -215,6 +302,7 @@ def stream_vllm_chat(
                 model=model,
                 messages=messages,
                 stream=True,
+                **_chat_completion_options(),
             )
             for chunk in stream:
                 delta = _get_assistant_delta(chunk)
@@ -247,6 +335,7 @@ def request_ollama_chat(
                 model=model,
                 messages=messages,
                 stream=False,
+                **_chat_completion_options(),
             )
     except OpenAIError as exc:
         raise _format_ollama_error(exc, endpoint) from exc
@@ -281,6 +370,7 @@ def stream_ollama_chat(
                 model=model,
                 messages=messages,
                 stream=True,
+                **_chat_completion_options(),
             )
             for chunk in stream:
                 delta = _get_assistant_delta(chunk)

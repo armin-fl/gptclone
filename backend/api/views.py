@@ -31,6 +31,7 @@ from .services import (
     UnsupportedLlmModelError,
     build_history_as_system_message,
     get_available_llm_models,
+    get_llm_model_statuses,
     request_llm_chat,
     stream_llm_chat,
 )
@@ -54,6 +55,13 @@ def _build_fork_title(title: str) -> str:
 
 def _stream_event(event: dict) -> bytes:
     return f"{json.dumps(event)}\n".encode("utf-8")
+
+
+class LlmModelListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"models": get_llm_model_statuses()})
 
 
 class ConversationListCreateView(APIView):

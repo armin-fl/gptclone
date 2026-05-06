@@ -24,6 +24,8 @@ docker compose up -d
 vLLM model servers:
 
 - `gpt-oss-20b`: `http://127.0.0.1:8001/v1`
+- `qwen3-32b-awq`: `http://127.0.0.1:8002/v1`
+- `qwq-32b-awq`: `http://127.0.0.1:8003/v1`
 
 Ollama model servers:
 
@@ -45,16 +47,28 @@ vLLM exports OpenTelemetry traces to Langfuse at
 `http://langfuse-web:3000/api/public/otel/v1/traces`. The Django backend also
 wraps each OpenAI-compatible chat completion with Langfuse so the trace includes
 the request, response, model, conversation session id, and user id.
+Model containers do not hard-depend on the `langfuse-web` service, so the
+override file can still be rendered or used for model-only commands.
 
 The Django backend routes by the request `model` field. vLLM and Ollama models
 both use OpenAI-compatible chat completions, and the Django backend wraps both
 providers with Langfuse's OpenAI client so application-level traces include the
 request, response, model, conversation session id, and user id.
 
-The current GPT-OSS model is loaded from `models/OpenAI`. That directory is the
+The current GPT-OSS model is loaded from `models/Vllm/OpenAI`. That directory is the
 Hugging Face/vLLM-ready model root with `config.json`, tokenizer files, chat
 template, the safetensors index, and safetensors shards. The nested
-`models/OpenAI/original` files are not mounted as the served model path.
+`models/Vllm/OpenAI/original` files are not mounted as the served model path.
+
+The Qwen3 32B AWQ and QwQ 32B AWQ vLLM models are loaded from
+`models/Vllm/Qwen3-32B-AWQ` and `models/Vllm/QwQ-32B-AWQ`.
+Their vLLM containers use a VRAM-saving profile: `--max-model-len 16384`,
+`--kv-cache-dtype fp8`, `--max-num-seqs 1`, `--enforce-eager`, and
+`--gpu-memory-utilization 0.82`. CPU model offload is explicitly disabled with
+`--cpu-offload-gb 0` and `--offload-group-size 0`; vLLM still uses CPU for
+normal orchestration, tokenization, networking, and process scheduling. The 32B
+services are profile-gated because a single 32 GB GPU cannot run both 32B AWQ
+servers at the same time.
 
 The current Qwen model is loaded from `models/Ollama/Qwen3-14b`. That directory
 is mounted as Ollama's `/root/.ollama/models` store, so the existing
@@ -129,12 +143,25 @@ docker compose up -d --force-recreate vllm-new-model
 ```
 
 You can choose any enabled backend model from the chat UI model selector.
+Stopped model containers appear disabled in the selector.
+Backend chat completions are capped by `LLM_MAX_COMPLETION_TOKENS`, defaulting
+to `1024`, to keep output length and memory use predictable.
+
+Start one 32B AWQ model at a time:
+
+```bash
+docker compose up -d vllm-qwen3-32b-awq
+docker compose stop vllm-qwen3-32b-awq
+docker compose up -d vllm-qwq-32b-awq
+```
 
 ### Containers And Data
 
 This dev stack keeps separate containers and data folders from earlier local stacks:
 
 - vLLM API container: `vllm-gpt-oss-20b-dev`
+- vLLM Qwen3 32B AWQ API container: `vllm-qwen3-32b-awq-dev`
+- vLLM QwQ 32B AWQ API container: `vllm-qwq-32b-awq-dev`
 - Ollama API container: `ollama-qwen3-14b-dev`
 - PostgreSQL container: `vllm-postgres-dev`
 - pgAdmin container: `vllm-pgadmin-dev`

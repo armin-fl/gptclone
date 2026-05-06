@@ -1,53 +1,97 @@
 services:
-  ollama-qwen3-14b:
-    image: ollama/ollama:latest
-    container_name: ollama-qwen3-14b-dev
-    restart: unless-stopped
-    environment:
-      OLLAMA_HOST: 0.0.0.0:11434
-      OLLAMA_MODELS: /root/.ollama/models
-      OLLAMA_KEEP_ALIVE: 10m
-    ports:
-      - "127.0.0.1:11434:11434"
-    volumes:
-      - ../../models/Ollama/Qwen3-14b:/root/.ollama/models
-    healthcheck:
-      test: ["CMD-SHELL", "OLLAMA_HOST=127.0.0.1:11434 ollama list >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+  # ollama-qwen3-14b:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama-qwen3-14b-dev
+  #   restart: unless-stopped
+  #   environment:
+  #     OLLAMA_HOST: 0.0.0.0:11434
+  #     OLLAMA_MODELS: /root/.ollama/models
+  #     OLLAMA_KEEP_ALIVE: 10m
+  #   ports:
+  #     - "127.0.0.1:11434:11434"
+  #   volumes:
+  #     - ../../models/Ollama/Qwen3-14b:/root/.ollama/models
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "OLLAMA_HOST=127.0.0.1:11434 ollama list >/dev/null 2>&1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 12
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
 
-  vllm-gpt-oss-20b:
+  # vllm-gpt-oss-20b:
+  #   image: vllm:gptclone
+  #   container_name: vllm-gpt-oss-20b-dev
+  #   restart: unless-stopped
+  #   ipc: host
+  #   environment:
+  #     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  #     OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+  #     OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+  #     OTEL_SERVICE_NAME: vllm-gpt-oss-20b
+  #   ports:
+  #     - "8001:8000"
+  #   volumes:
+  #     - ../../data/huggingface:/root/.cache/huggingface
+  #     - ../../models/Vllm/OpenAI:/models/gpt-oss-20b:ro
+  #   command:
+  #     - --model
+  #     - /models/gpt-oss-20b
+  #     - --served-model-name
+  #     - gpt-oss-20b
+  #     - --dtype
+  #     - auto
+  #     - --otlp-traces-endpoint
+  #     - http://langfuse-web:3000/api/public/otel/v1/traces
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+
+  vllm-qwen3-32b-awq:
     image: vllm:gptclone
-    container_name: vllm-gpt-oss-20b-dev
+    container_name: vllm-qwen3-32b-awq-dev
+    profiles: ["qwen3-32b-awq"]
     restart: unless-stopped
     ipc: host
     environment:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
-      OTEL_SERVICE_NAME: vllm-gpt-oss-20b
+      OTEL_SERVICE_NAME: vllm-qwen3-32b-awq
     ports:
-      - "8001:8000"
+      - "8002:8000"
     volumes:
       - ../../data/huggingface:/root/.cache/huggingface
-      - ../../models/OpenAI:/models/gpt-oss-20b:ro
-    depends_on:
-      langfuse-web:
-        condition: service_started
+      - ../../models/Vllm/Qwen3-32B-AWQ:/models/qwen3-32b-awq:ro
     command:
       - --model
-      - /models/gpt-oss-20b
+      - /models/qwen3-32b-awq
       - --served-model-name
-      - gpt-oss-20b
+      - qwen3-32b-awq
       - --dtype
       - auto
+      - --cpu-offload-gb
+      - "0"
+      - --offload-group-size
+      - "0"
+      - --gpu-memory-utilization
+      - "0.82"
+      - --max-model-len
+      - "16384"
+      - --kv-cache-dtype
+      - fp8
+      - --max-num-seqs
+      - "1"
+      - --enforce-eager
       - --otlp-traces-endpoint
       - http://langfuse-web:3000/api/public/otel/v1/traces
     deploy:
@@ -57,3 +101,49 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # vllm-qwq-32b-awq:
+  #   image: vllm:gptclone
+  #   container_name: vllm-qwq-32b-awq-dev
+  #   profiles: ["qwq-32b-awq"]
+  #   restart: unless-stopped
+  #   ipc: host
+  #   environment:
+  #     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  #     OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+  #     OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+  #     OTEL_SERVICE_NAME: vllm-qwq-32b-awq
+  #   ports:
+  #     - "8003:8000"
+  #   volumes:
+  #     - ../../data/huggingface:/root/.cache/huggingface
+  #     - ../../models/Vllm/QwQ-32B-AWQ:/models/qwq-32b-awq:ro
+  #   command:
+  #     - --model
+  #     - /models/qwq-32b-awq
+  #     - --served-model-name
+  #     - qwq-32b-awq
+  #     - --dtype
+  #     - auto
+  #     - --cpu-offload-gb
+  #     - "0"
+  #     - --offload-group-size
+  #     - "0"
+  #     - --gpu-memory-utilization
+  #     - "0.82"
+  #     - --max-model-len
+  #     - "16384"
+  #     - --kv-cache-dtype
+  #     - fp8
+  #     - --max-num-seqs
+  #     - "1"
+  #     - --enforce-eager
+  #     - --otlp-traces-endpoint
+  #     - http://langfuse-web:3000/api/public/otel/v1/traces
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]

@@ -133,8 +133,12 @@ VLLM_MODEL = "gpt-oss-20b"
 VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "EMPTY")
 VLLM_MODELS = {
     "gpt-oss-20b": "http://127.0.0.1:8001/v1",
+    "qwen3-32b-awq": "http://127.0.0.1:8002/v1",
+    "qwq-32b-awq": "http://127.0.0.1:8003/v1",
 }
 VLLM_TIMEOUT_SECONDS = 120
+LLM_MODEL_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("LLM_MODEL_HEALTH_TIMEOUT_SECONDS", "0.8"))
+LLM_MODEL_HEALTH_CACHE_SECONDS = int(os.environ.get("LLM_MODEL_HEALTH_CACHE_SECONDS", "5"))
 
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:14b")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
@@ -145,6 +149,7 @@ OLLAMA_MODELS = {
 OLLAMA_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "300"))
 
 LLM_MODEL = os.environ.get("LLM_MODEL", VLLM_MODEL)
+LLM_MAX_COMPLETION_TOKENS = int(os.environ.get("LLM_MAX_COMPLETION_TOKENS", "1024"))
 LLM_MODELS = {
     **{
         model: {

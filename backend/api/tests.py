@@ -4,11 +4,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.conf import settings
+from django.core.cache import cache
+from django.db import connection
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
-from django.db import connection
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
+from requests import RequestException
 
 from accounts.models import User
 from api.models import Conversation, Message
@@ -21,6 +23,7 @@ from .services import (
     get_available_llm_models,
     get_ollama_base_url,
     get_available_vllm_models,
+    get_llm_model_status,
     get_vllm_base_url,
     request_llm_chat,
     request_ollama_chat,
@@ -31,6 +34,9 @@ from .services import (
 
 
 class VllmServiceTests(SimpleTestCase):
+    def setUp(self):
+        cache.clear()
+
     def test_build_history_as_system_message_includes_previous_messages(self):
         history = build_history_as_system_message(
             [
@@ -44,15 +50,29 @@ class VllmServiceTests(SimpleTestCase):
         self.assertIn("ASSISTANT: Hi there", history)
 
     def test_get_available_vllm_models_returns_hardcoded_models(self):
-        self.assertEqual(get_available_vllm_models(), ["gpt-oss-20b"])
+        self.assertEqual(
+            get_available_vllm_models(),
+            ["gpt-oss-20b", "qwen3-32b-awq", "qwq-32b-awq"],
+        )
 
     def test_get_available_llm_models_returns_gateway_models(self):
-        self.assertEqual(get_available_llm_models(), ["gpt-oss-20b", "qwen3:14b"])
+        self.assertEqual(
+            get_available_llm_models(),
+            ["gpt-oss-20b", "qwen3-32b-awq", "qwq-32b-awq", "qwen3:14b"],
+        )
 
     def test_get_vllm_base_url_routes_by_model_name(self):
         self.assertEqual(
             get_vllm_base_url("gpt-oss-20b"),
             "http://127.0.0.1:8001/v1",
+        )
+        self.assertEqual(
+            get_vllm_base_url("qwen3-32b-awq"),
+            "http://127.0.0.1:8002/v1",
+        )
+        self.assertEqual(
+            get_vllm_base_url("qwq-32b-awq"),
+            "http://127.0.0.1:8003/v1",
         )
 
     def test_get_ollama_base_url_routes_by_model_name(self):
@@ -88,6 +108,29 @@ class VllmServiceTests(SimpleTestCase):
             "Model 'gpt-oss-20b' is not configured for Ollama.",
         ):
             get_ollama_base_url("gpt-oss-20b")
+
+    @patch("api.services.requests.get")
+    def test_get_llm_model_status_marks_served_model_available(self, mock_get):
+        mock_get.return_value = _FakeModelListResponse(["gpt-oss-20b"])
+
+        status = get_llm_model_status("gpt-oss-20b")
+
+        self.assertEqual(status["id"], "gpt-oss-20b")
+        self.assertTrue(status["available"])
+        self.assertEqual(status["provider"], "vllm")
+        mock_get.assert_called_once_with(
+            "http://127.0.0.1:8001/v1/models",
+            headers={"Authorization": f"Bearer {settings.VLLM_API_KEY}"},
+            timeout=settings.LLM_MODEL_HEALTH_TIMEOUT_SECONDS,
+        )
+
+    @patch("api.services.requests.get")
+    def test_get_llm_model_status_grays_out_stopped_model(self, mock_get):
+        mock_get.side_effect = RequestException("Connection refused")
+
+        status = get_llm_model_status("gpt-oss-20b")
+
+        self.assertFalse(status["available"])
 
     @patch("api.services.LangfuseOpenAI")
     def test_build_vllm_client_uses_openai_compatible_base_url(self, mock_openai):
@@ -145,6 +188,7 @@ class VllmServiceTests(SimpleTestCase):
             model="gpt-oss-20b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
+            max_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
         )
 
     @patch("api.services.request_ollama_chat")
@@ -204,6 +248,7 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
+            max_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
         )
 
     @patch("api.services.propagate_attributes")
@@ -262,6 +307,7 @@ class VllmServiceTests(SimpleTestCase):
             model="gpt-oss-20b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=True,
+            max_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
         )
 
     @patch("api.services.propagate_attributes")
@@ -291,6 +337,7 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=True,
+            max_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
         )
 
 
@@ -312,6 +359,20 @@ class _FakeStreamChunk:
         ]
 
 
+class _FakeModelListResponse:
+    def __init__(self, model_ids):
+        self.model_ids = model_ids
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {
+            "object": "list",
+            "data": [{"id": model_id, "object": "model"} for model_id in self.model_ids],
+        }
+
+
 class ConversationAuthorizationTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -326,6 +387,25 @@ class ConversationAuthorizationTests(TestCase):
         response = self.client.get("/api/conversations/")
 
         self.assertEqual(response.status_code, 401)
+
+    @patch("api.views.get_llm_model_statuses")
+    def test_model_list_endpoint_returns_model_statuses(self, mock_get_statuses):
+        mock_get_statuses.return_value = [
+            {
+                "id": "gpt-oss-20b",
+                "label": "gpt-oss-20b",
+                "provider": "vllm",
+                "available": False,
+                "reason": "Connection refused",
+            }
+        ]
+
+        self.authenticate(self.user)
+        response = self.client.get("/api/models/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["models"][0]["id"], "gpt-oss-20b")
+        self.assertFalse(response.data["models"][0]["available"])
 
     def test_conversations_are_scoped_to_authenticated_user(self):
         self.authenticate(self.user)

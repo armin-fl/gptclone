@@ -6,6 +6,7 @@ import type {
   ConversationPage,
   ConversationDetail,
   InitialChatData,
+  LlmModelsResponse,
   OTPRequestResponse,
   TokenRefreshResponse,
 } from "@/lib/types";
@@ -181,6 +182,10 @@ export function listConversations(
   }
   const suffix = search.toString();
   return request<ConversationPage>(`/api/conversations/${suffix ? `?${suffix}` : ""}`);
+}
+
+export function listModels() {
+  return request<LlmModelsResponse>("/api/models/");
 }
 
 export function getConversation(

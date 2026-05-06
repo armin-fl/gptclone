@@ -45,6 +45,7 @@ import {
   getSession,
   HttpError,
   listConversations,
+  listModels,
   refreshAuthToken,
   requestPhoneChangeOtp,
   requestOtp,
@@ -57,7 +58,15 @@ import {
   verifyPhoneChangeOtp,
   verifyOtp,
 } from "@/lib/api";
-import type { AuthUser, ChatMessage, Conversation, ConversationDetail, ConversationPage, InitialChatData } from "@/lib/types";
+import type {
+  AuthUser,
+  ChatMessage,
+  Conversation,
+  ConversationDetail,
+  ConversationPage,
+  InitialChatData,
+  LlmModelStatus,
+} from "@/lib/types";
 import { ChatMessageRenderer } from "@/components/chat/chat-message-renderer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -77,6 +86,7 @@ const PHONE_REST_LENGTH = 9;
 const PHONE_LENGTH = PHONE_PREFIX.length + PHONE_REST_LENGTH;
 const PHONE_NUMBER_PATTERN = /^09[0-9]{9}$/;
 const CHAT_BOTTOM_THRESHOLD = 56;
+const MODEL_STATUS_REFRESH_MS = 15000;
 const DEFAULT_SYSTEM_INSTRUCTION =
   "You are a helpful AI assistant. Use concise and actionable answers unless the user asks for detail.";
 
@@ -88,7 +98,14 @@ interface AuthSession {
   authenticated: true;
 }
 
-const MODEL_OPTIONS = [
+interface ModelOption {
+  id: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+}
+
+const MODEL_OPTIONS: ModelOption[] = [
   {
     id: "gpt-oss-20b",
     label: "GPTClone 20B",
@@ -99,6 +116,18 @@ const MODEL_OPTIONS = [
     id: "qwen3:14b",
     label: "Qwen3 14B",
     description: "Local Ollama model",
+    enabled: true,
+  },
+  {
+    id: "qwen3-32b-awq",
+    label: "Qwen3 32B AWQ",
+    description: "Local vLLM AWQ model",
+    enabled: true,
+  },
+  {
+    id: "qwq-32b-awq",
+    label: "QwQ 32B AWQ",
+    description: "Local reasoning vLLM AWQ model",
     enabled: true,
   },
   {
@@ -385,6 +414,8 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const [draft, setDraft] = useState("");
   const [systemInstruction, setSystemInstruction] = useState(DEFAULT_SYSTEM_INSTRUCTION);
   const [selectedModel, setSelectedModel] = useState(MODEL_OPTIONS[0].id);
+  const [modelStatuses, setModelStatuses] = useState<Record<string, LlmModelStatus>>({});
+  const [isRefreshingModelStatuses, setIsRefreshingModelStatuses] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -445,7 +476,24 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const isDark = theme === "dark";
   const activeConversationId = activeConversation?.id;
   const isAuthenticated = Boolean(authSession);
-  const activeModel = MODEL_OPTIONS.find((model) => model.id === selectedModel) ?? MODEL_OPTIONS[0];
+  const modelOptions = useMemo(
+    () =>
+      MODEL_OPTIONS.map((model) => {
+        const status = modelStatuses[model.id];
+        if (!model.enabled || !status) {
+          return model;
+        }
+        return {
+          ...model,
+          description: status.available ? model.description : "Model container is stopped",
+          enabled: status.available,
+        };
+      }),
+    [modelStatuses],
+  );
+  const activeModel = modelOptions.find((model) => model.id === selectedModel) ?? modelOptions[0];
+  const isActiveModelAvailable = activeModel.enabled;
+  const canSubmitDraft = Boolean(draft.trim()) && isActiveModelAvailable;
   const profileDisplayName = getDisplayName(currentUser, phoneNumber);
   const profileImageUrl = currentUser?.profile_image_url || "";
   const phoneRestInput = phoneInput.startsWith(PHONE_PREFIX) ? phoneInput.slice(PHONE_PREFIX.length) : "";
@@ -580,6 +628,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     setActiveConversation(null);
     setIsComposingNewChat(false);
     setDraft("");
+    setModelStatuses({});
     setCurrentConversationUrl(null);
     window.localStorage.removeItem(LEGACY_ACCESS_TOKEN_STORAGE_KEY);
     window.localStorage.removeItem(LEGACY_REFRESH_TOKEN_STORAGE_KEY);
@@ -700,6 +749,58 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     },
     [authSession, clearAuthSession, persistAuthSession],
   );
+
+  const applyModelStatuses = useCallback((models: LlmModelStatus[]) => {
+    const statusesById = Object.fromEntries(models.map((model) => [model.id, model]));
+    setModelStatuses(statusesById);
+    setSelectedModel((currentModel) => {
+      const currentOption = MODEL_OPTIONS.find((model) => model.id === currentModel);
+      const currentStatus = statusesById[currentModel];
+      if (!currentOption?.enabled || !currentStatus || currentStatus.available) {
+        return currentModel;
+      }
+
+      return (
+        MODEL_OPTIONS.find((model) => model.enabled && statusesById[model.id]?.available)?.id
+        ?? currentModel
+      );
+    });
+  }, []);
+
+  const refreshModelStatuses = useCallback(async () => {
+    if (!authSession) {
+      setModelStatuses({});
+      return;
+    }
+
+    setIsRefreshingModelStatuses(true);
+    try {
+      const response = await performAuthenticated(() => listModels());
+      applyModelStatuses(response.models);
+    } catch {
+      // Keep the last known statuses; chat requests still show their normal backend errors.
+    } finally {
+      setIsRefreshingModelStatuses(false);
+    }
+  }, [applyModelStatuses, authSession, performAuthenticated]);
+
+  useEffect(() => {
+    if (!authSession) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void refreshModelStatuses();
+    }, 0);
+    const intervalId = window.setInterval(() => {
+      void refreshModelStatuses();
+    }, MODEL_STATUS_REFRESH_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
+    };
+  }, [authSession, refreshModelStatuses]);
 
   useEffect(() => {
     if (!authSession) {
@@ -1255,6 +1356,11 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       setError("Sign in first.");
       return;
     }
+    if (!isActiveModelAvailable) {
+      setError(`${activeModel.label} is not available.`);
+      void refreshModelStatuses();
+      return;
+    }
 
     setIsSending(true);
     setError(null);
@@ -1439,6 +1545,11 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       message.id < 0 ||
       message.id !== latestAssistantMessageId
     ) {
+      return;
+    }
+    if (!isActiveModelAvailable) {
+      setError(`${activeModel.label} is not available.`);
+      void refreshModelStatuses();
       return;
     }
 
@@ -1647,6 +1758,11 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
 
   async function submitEditedMessage(message: ChatMessage, content: string) {
     if (!authSession || !activeConversation || message.role !== "user" || message.id < 0 || isSending) {
+      return;
+    }
+    if (!isActiveModelAvailable) {
+      setError(`${activeModel.label} is not available.`);
+      void refreshModelStatuses();
       return;
     }
 
@@ -2933,7 +3049,15 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
               <div ref={modelMenuRef} className="relative">
                 <button
                   type="button"
-                  onClick={() => setIsModelMenuOpen((value) => !value)}
+                  onClick={() => {
+                    setIsModelMenuOpen((value) => {
+                      const nextValue = !value;
+                      if (nextValue) {
+                        void refreshModelStatuses();
+                      }
+                      return nextValue;
+                    });
+                  }}
                   className={cn(
                     "flex h-10 max-w-[260px] items-center gap-2 rounded-lg px-3 text-lg font-medium transition",
                     isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#f2f2f2]",
@@ -2945,6 +3069,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
 
                 {isModelMenuOpen ? (
                   <div
+                    aria-busy={isRefreshingModelStatuses}
                     className={cn(
                       "absolute left-0 top-12 z-50 w-[300px] rounded-xl border p-2 shadow-2xl",
                       isDark
@@ -2952,11 +3077,12 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                         : "border-[#dedede] bg-white text-[#171717]",
                     )}
                   >
-                    {MODEL_OPTIONS.map((model) => (
+                    {modelOptions.map((model) => (
                       <button
                         key={model.id}
                         type="button"
                         disabled={!model.enabled}
+                        title={!model.enabled ? model.description : undefined}
                         onClick={() => {
                           if (!model.enabled) {
                             return;
@@ -3253,7 +3379,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                                   <button
                                     type="button"
                                     onClick={() => handleEditSubmit(message)}
-                                    disabled={!editDraft.trim() || isSending}
+                                    disabled={!editDraft.trim() || isSending || !isActiveModelAvailable}
                                     className={cn(
                                       "h-10 rounded-full px-5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
                                       isDark
@@ -3368,7 +3494,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                     />
                     <button
                       type="submit"
-                      disabled={!draft.trim() && !isSending}
+                      disabled={!canSubmitDraft && !isSending}
                       onClick={(event) => {
                         if (isSending) {
                           event.preventDefault();
@@ -3377,7 +3503,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                       }}
                       className={cn(
                         "grid h-9 w-9 shrink-0 place-items-center rounded-full transition disabled:cursor-not-allowed",
-                        draft.trim() || isSending
+                        canSubmitDraft || isSending
                           ? "bg-[#4668d9] text-white hover:bg-[#5577ea]"
                           : isDark
                             ? "bg-[#424242] text-[#a8a8a8]"

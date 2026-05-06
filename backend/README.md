@@ -16,6 +16,8 @@ This backend is set up for **development only**.
   - `POST /api/conversations/<conversation_id>/messages/`
 - LLM gateway integration:
   - `gpt-oss-20b` -> `POST http://127.0.0.1:8001/v1/chat/completions`
+  - `qwen3-32b-awq` -> `POST http://127.0.0.1:8002/v1/chat/completions`
+  - `qwq-32b-awq` -> `POST http://127.0.0.1:8003/v1/chat/completions`
   - `qwen3:14b` -> `POST http://127.0.0.1:11434/v1/chat/completions`
 - Langfuse tracing for vLLM and Ollama OpenAI-compatible chat completions:
   - Langfuse UI -> `http://127.0.0.1:3001`
@@ -45,6 +47,8 @@ VLLM_MODEL = "gpt-oss-20b"
 VLLM_API_KEY = "EMPTY"
 VLLM_MODELS = {
     "gpt-oss-20b": "http://127.0.0.1:8001/v1",
+    "qwen3-32b-awq": "http://127.0.0.1:8002/v1",
+    "qwq-32b-awq": "http://127.0.0.1:8003/v1",
 }
 VLLM_TIMEOUT_SECONDS = 120
 OLLAMA_MODEL = "qwen3:14b"
@@ -52,8 +56,11 @@ OLLAMA_API_KEY = "ollama"
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 OLLAMA_TIMEOUT_SECONDS = 300
 LLM_MODEL = "gpt-oss-20b"
+LLM_MAX_COMPLETION_TOKENS = 1024
 LLM_MODELS = {
     "gpt-oss-20b": {"provider": "vllm", "base_url": "http://127.0.0.1:8001/v1"},
+    "qwen3-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8002/v1"},
+    "qwq-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8003/v1"},
     "qwen3:14b": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1"},
 }
 LANGFUSE_BASE_URL = "http://127.0.0.1:3001"
