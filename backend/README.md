@@ -1,4 +1,4 @@
-## Backend (Django + DRF + PostgreSQL + vLLM)
+## Backend (Django + DRF + PostgreSQL + LLM Gateway)
 
 This backend is set up for **development only**.
 
@@ -14,12 +14,13 @@ This backend is set up for **development only**.
   - `POST /api/conversations/`
   - `GET /api/conversations/<conversation_id>/`
   - `POST /api/conversations/<conversation_id>/messages/`
-- vLLM integration via OpenAI-compatible chat-completions endpoints:
+- LLM gateway integration:
   - `gpt-oss-20b` -> `POST http://127.0.0.1:8001/v1/chat/completions`
-- Langfuse tracing for vLLM chat completions:
+  - `qwen3:14b` -> `POST http://127.0.0.1:11434/v1/chat/completions`
+- Langfuse tracing for vLLM and Ollama OpenAI-compatible chat completions:
   - Langfuse UI -> `http://127.0.0.1:3001`
   - Default dev project keys are initialized by Docker Compose.
-- Full conversation history is sent to vLLM as a **system message** before the latest user message.
+- Full conversation history is sent to the selected LLM as a **system message** before the latest user message.
 - Phone + OTP authentication with SimpleJWT symmetric HS256 access/refresh tokens:
   - `POST /api/auth/request-otp/`
   - `POST /api/auth/verify-otp/`
@@ -37,7 +38,7 @@ pip install -r requirements.txt
 
 Development values are hard-coded in `config/settings.py`; no env file is used.
 
-Current hard-coded vLLM model routing:
+Current hard-coded LLM model routing:
 
 ```python
 VLLM_MODEL = "gpt-oss-20b"
@@ -46,6 +47,15 @@ VLLM_MODELS = {
     "gpt-oss-20b": "http://127.0.0.1:8001/v1",
 }
 VLLM_TIMEOUT_SECONDS = 120
+OLLAMA_MODEL = "qwen3:14b"
+OLLAMA_API_KEY = "ollama"
+OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
+OLLAMA_TIMEOUT_SECONDS = 300
+LLM_MODEL = "gpt-oss-20b"
+LLM_MODELS = {
+    "gpt-oss-20b": {"provider": "vllm", "base_url": "http://127.0.0.1:8001/v1"},
+    "qwen3:14b": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1"},
+}
 LANGFUSE_BASE_URL = "http://127.0.0.1:3001"
 LANGFUSE_PUBLIC_KEY = "pk-lf-dev-project-key"
 LANGFUSE_SECRET_KEY = "sk-lf-dev-secret-key"

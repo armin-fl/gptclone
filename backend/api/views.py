@@ -28,11 +28,11 @@ from .serializers import (
     SendMessageSerializer,
 )
 from .services import (
-    UnsupportedVllmModelError,
+    UnsupportedLlmModelError,
     build_history_as_system_message,
-    get_available_vllm_models,
-    request_vllm_chat,
-    stream_vllm_chat,
+    get_available_llm_models,
+    request_llm_chat,
+    stream_llm_chat,
 )
 
 
@@ -195,7 +195,7 @@ class ConversationSendMessageView(APIView):
             yield _stream_event(initial_event)
 
         try:
-            for delta in stream_vllm_chat(
+            for delta in stream_llm_chat(
                 model=model,
                 messages=llm_messages,
                 langfuse_session_id=str(conversation_id),
@@ -207,12 +207,12 @@ class ConversationSendMessageView(APIView):
         except GeneratorExit:
             self._save_assistant_reply(conversation_id, "".join(chunks), model)
             raise
-        except (UnsupportedVllmModelError, RuntimeError) as exc:
+        except (UnsupportedLlmModelError, RuntimeError) as exc:
             self._save_assistant_reply(conversation_id, "".join(chunks), model)
             yield _stream_event(
                 {
                     "type": "error",
-                    "detail": "Failed to get response from vLLM.",
+                    "detail": "Failed to get response from LLM.",
                     "error": str(exc),
                 }
             )
@@ -223,8 +223,8 @@ class ConversationSendMessageView(APIView):
             yield _stream_event(
                 {
                     "type": "error",
-                    "detail": "Failed to get response from vLLM.",
-                    "error": "vLLM returned an empty assistant message.",
+                    "detail": "Failed to get response from LLM.",
+                    "error": "LLM returned an empty assistant message.",
                 }
             )
             return
@@ -269,13 +269,13 @@ class ConversationSendMessageView(APIView):
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
         content = serializer.validated_data["content"]
-        model = serializer.validated_data.get("model") or settings.VLLM_MODEL
-        # Flow 2: check the requested model through get_available_vllm_models() before saving or calling vLLM.
-        if model not in get_available_vllm_models():
+        model = serializer.validated_data.get("model") or settings.LLM_MODEL
+        # Flow 2: check the requested model before saving or calling the provider.
+        if model not in get_available_llm_models():
             return Response(
                 {
-                    "detail": "Unsupported vLLM model.",
-                    "available_models": get_available_vllm_models(),
+                    "detail": "Unsupported LLM model.",
+                    "available_models": get_available_llm_models(),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -295,7 +295,7 @@ class ConversationSendMessageView(APIView):
             )
 
             previous_messages = latest_prompt_messages(conversation, exclude_message_id=user_message.id)
-            # Flow 4: build_history_as_system_message() turns older messages into vLLM context.
+            # Flow 4: build_history_as_system_message() turns older messages into LLM context.
             history_system_message = build_history_as_system_message(previous_messages)
 
             llm_messages = [
@@ -333,19 +333,19 @@ class ConversationSendMessageView(APIView):
                 )
 
             try:
-                # Flow 5: request_vllm_chat() sends the prepared messages to vLLM and returns assistant text.
-                assistant_reply = request_vllm_chat(
+                # Flow 5: request_llm_chat() sends the prepared messages to the provider and returns assistant text.
+                assistant_reply = request_llm_chat(
                     model=model,
                     messages=llm_messages,
                     langfuse_session_id=str(conversation.id),
                     langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
                 )
-            except UnsupportedVllmModelError as exc:
+            except UnsupportedLlmModelError as exc:
                 transaction.set_rollback(True)
                 return Response(
                     {
-                        "detail": "Unsupported vLLM model.",
+                        "detail": "Unsupported LLM model.",
                         "error": str(exc),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
@@ -354,7 +354,7 @@ class ConversationSendMessageView(APIView):
                 transaction.set_rollback(True)
                 return Response(
                     {
-                        "detail": "Failed to get response from vLLM.",
+                        "detail": "Failed to get response from LLM.",
                         "error": str(exc),
                     },
                     status=status.HTTP_502_BAD_GATEWAY,
@@ -391,12 +391,12 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
         if not conversation:
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        model = serializer.validated_data.get("model") or settings.VLLM_MODEL
-        if model not in get_available_vllm_models():
+        model = serializer.validated_data.get("model") or settings.LLM_MODEL
+        if model not in get_available_llm_models():
             return Response(
                 {
-                    "detail": "Unsupported vLLM model.",
-                    "available_models": get_available_vllm_models(),
+                    "detail": "Unsupported LLM model.",
+                    "available_models": get_available_llm_models(),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -492,18 +492,18 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                 )
 
             try:
-                assistant_reply = request_vllm_chat(
+                assistant_reply = request_llm_chat(
                     model=model,
                     messages=llm_messages,
                     langfuse_session_id=str(locked_conversation.id),
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
                 )
-            except UnsupportedVllmModelError as exc:
+            except UnsupportedLlmModelError as exc:
                 transaction.set_rollback(True)
                 return Response(
                     {
-                        "detail": "Unsupported vLLM model.",
+                        "detail": "Unsupported LLM model.",
                         "error": str(exc),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
@@ -512,7 +512,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                 transaction.set_rollback(True)
                 return Response(
                     {
-                        "detail": "Failed to get response from vLLM.",
+                        "detail": "Failed to get response from LLM.",
                         "error": str(exc),
                     },
                     status=status.HTTP_502_BAD_GATEWAY,
@@ -594,12 +594,12 @@ class ConversationEditMessageView(ConversationSendMessageView):
         if not conversation:
             return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        model = serializer.validated_data.get("model") or settings.VLLM_MODEL
-        if model not in get_available_vllm_models():
+        model = serializer.validated_data.get("model") or settings.LLM_MODEL
+        if model not in get_available_llm_models():
             return Response(
                 {
-                    "detail": "Unsupported vLLM model.",
-                    "available_models": get_available_vllm_models(),
+                    "detail": "Unsupported LLM model.",
+                    "available_models": get_available_llm_models(),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -680,18 +680,18 @@ class ConversationEditMessageView(ConversationSendMessageView):
                 )
 
             try:
-                assistant_reply = request_vllm_chat(
+                assistant_reply = request_llm_chat(
                     model=model,
                     messages=llm_messages,
                     langfuse_session_id=str(locked_conversation.id),
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
                 )
-            except UnsupportedVllmModelError as exc:
+            except UnsupportedLlmModelError as exc:
                 transaction.set_rollback(True)
                 return Response(
                     {
-                        "detail": "Unsupported vLLM model.",
+                        "detail": "Unsupported LLM model.",
                         "error": str(exc),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
@@ -700,7 +700,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
                 transaction.set_rollback(True)
                 return Response(
                     {
-                        "detail": "Failed to get response from vLLM.",
+                        "detail": "Failed to get response from LLM.",
                         "error": str(exc),
                     },
                     status=status.HTTP_502_BAD_GATEWAY,

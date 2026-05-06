@@ -3,6 +3,7 @@
 This setup runs only infrastructure services:
 
 - vLLM OpenAI-compatible API servers
+- Ollama local model servers
 - PostgreSQL
 - pgAdmin
 - Langfuse observability stack
@@ -10,7 +11,7 @@ This setup runs only infrastructure services:
 Django and Next.js run outside Docker.
 
 The base `docker-compose.yml` stays stable and contains shared infrastructure.
-vLLM model containers live in `docker-compose.override.yml`, which Docker Compose
+Model containers live in `docker-compose.override.yml`, which Docker Compose
 merges automatically when you run commands from this directory.
 
 ### Start
@@ -23,6 +24,10 @@ docker compose up -d
 vLLM model servers:
 
 - `gpt-oss-20b`: `http://127.0.0.1:8001/v1`
+
+Ollama model servers:
+
+- `qwen3:14b`: `http://127.0.0.1:11434/v1`
 
 Langfuse:
 
@@ -41,19 +46,26 @@ vLLM exports OpenTelemetry traces to Langfuse at
 wraps each OpenAI-compatible chat completion with Langfuse so the trace includes
 the request, response, model, conversation session id, and user id.
 
-The Django backend routes by the OpenAI request `model` field, so more than one
-model server can run at the same time when additional services are added.
+The Django backend routes by the request `model` field. vLLM and Ollama models
+both use OpenAI-compatible chat completions, and the Django backend wraps both
+providers with Langfuse's OpenAI client so application-level traces include the
+request, response, model, conversation session id, and user id.
 
 The current GPT-OSS model is loaded from `models/OpenAI`. That directory is the
 Hugging Face/vLLM-ready model root with `config.json`, tokenizer files, chat
 template, the safetensors index, and safetensors shards. The nested
 `models/OpenAI/original` files are not mounted as the served model path.
 
+The current Qwen model is loaded from `models/Ollama/Qwen3-14b`. That directory
+is mounted as Ollama's `/root/.ollama/models` store, so the existing
+`blobs/` and `manifests/registry.ollama.ai/library/qwen3/14b` files are used
+directly by the official `ollama/ollama` image.
+
 ### Change The Model
 
 vLLM does not serve multiple base models from one OpenAI-compatible server.
-The supported pattern is multiple vLLM server instances plus a routing layer.
-Here, Docker Compose starts one vLLM container per model and Django is the router.
+The supported pattern is one model server per model plus a routing layer.
+Here, Docker Compose starts vLLM and Ollama containers, and Django is the router.
 
 Model settings are hard-coded. To add a model, leave `docker-compose.yml` alone
 and add one service to `docker-compose.override.yml`:
@@ -94,6 +106,10 @@ VLLM_MODELS = {
 }
 ```
 
+To add another Ollama model already stored on disk, add another Ollama service
+that mounts the model store directory as `/root/.ollama/models`, then add it to
+`LLM_MODELS` with provider `ollama` and a base URL ending in `/v1`.
+
 If you add another vLLM container and want server-side traces, also set:
 
 ```yaml
@@ -112,13 +128,14 @@ Start or recreate only that model container:
 docker compose up -d --force-recreate vllm-new-model
 ```
 
-You can also type the served model name in the chat UI model field for a single request.
+You can choose any enabled backend model from the chat UI model selector.
 
 ### Containers And Data
 
-This vLLM dev stack keeps separate containers and data folders from earlier local stacks:
+This dev stack keeps separate containers and data folders from earlier local stacks:
 
 - vLLM API container: `vllm-gpt-oss-20b-dev`
+- Ollama API container: `ollama-qwen3-14b-dev`
 - PostgreSQL container: `vllm-postgres-dev`
 - pgAdmin container: `vllm-pgadmin-dev`
 - Langfuse UI container: `vllm-langfuse-web-dev`

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.conf import settings
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.db import connection
 from rest_framework.test import APIClient
@@ -13,12 +13,19 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from accounts.models import User
 from api.models import Conversation, Message
 from .services import (
+    UnsupportedLlmModelError,
     UnsupportedVllmModelError,
+    _build_ollama_client,
     _build_vllm_client,
     build_history_as_system_message,
+    get_available_llm_models,
+    get_ollama_base_url,
     get_available_vllm_models,
     get_vllm_base_url,
+    request_llm_chat,
+    request_ollama_chat,
     request_vllm_chat,
+    stream_ollama_chat,
     stream_vllm_chat,
 )
 
@@ -39,10 +46,33 @@ class VllmServiceTests(SimpleTestCase):
     def test_get_available_vllm_models_returns_hardcoded_models(self):
         self.assertEqual(get_available_vllm_models(), ["gpt-oss-20b"])
 
+    def test_get_available_llm_models_returns_gateway_models(self):
+        self.assertEqual(get_available_llm_models(), ["gpt-oss-20b", "qwen3:14b"])
+
     def test_get_vllm_base_url_routes_by_model_name(self):
         self.assertEqual(
             get_vllm_base_url("gpt-oss-20b"),
             "http://127.0.0.1:8001/v1",
+        )
+
+    def test_get_ollama_base_url_routes_by_model_name(self):
+        self.assertEqual(
+            get_ollama_base_url("qwen3:14b"),
+            "http://127.0.0.1:11434/v1",
+        )
+
+    @override_settings(
+        LLM_MODELS={
+            "qwen3:14b": {
+                "provider": "ollama",
+                "base_url": "http://127.0.0.1:11434/api",
+            },
+        }
+    )
+    def test_get_ollama_base_url_normalizes_native_api_url(self):
+        self.assertEqual(
+            get_ollama_base_url("qwen3:14b"),
+            "http://127.0.0.1:11434/v1",
         )
 
     def test_get_vllm_base_url_rejects_unknown_model(self):
@@ -52,6 +82,13 @@ class VllmServiceTests(SimpleTestCase):
         ):
             get_vllm_base_url("unknown-model")
 
+    def test_get_ollama_base_url_rejects_non_ollama_model(self):
+        with self.assertRaisesMessage(
+            UnsupportedLlmModelError,
+            "Model 'gpt-oss-20b' is not configured for Ollama.",
+        ):
+            get_ollama_base_url("gpt-oss-20b")
+
     @patch("api.services.LangfuseOpenAI")
     def test_build_vllm_client_uses_openai_compatible_base_url(self, mock_openai):
         _build_vllm_client("gpt-oss-20b")
@@ -60,6 +97,16 @@ class VllmServiceTests(SimpleTestCase):
             api_key=settings.VLLM_API_KEY,
             base_url="http://127.0.0.1:8001/v1",
             timeout=120,
+        )
+
+    @patch("api.services.LangfuseOpenAI")
+    def test_build_ollama_client_uses_openai_compatible_base_url(self, mock_openai):
+        _build_ollama_client("qwen3:14b")
+
+        mock_openai.assert_called_once_with(
+            api_key=settings.OLLAMA_API_KEY,
+            base_url="http://127.0.0.1:11434/v1",
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
         )
 
     @patch("api.services.propagate_attributes")
@@ -96,6 +143,65 @@ class VllmServiceTests(SimpleTestCase):
         )
         mock_client.chat.completions.create.assert_called_once_with(
             model="gpt-oss-20b",
+            messages=[{"role": "user", "content": "Hello"}],
+            stream=False,
+        )
+
+    @patch("api.services.request_ollama_chat")
+    def test_request_llm_chat_routes_qwen_to_ollama(self, mock_request_ollama_chat):
+        mock_request_ollama_chat.return_value = "Hello from Qwen"
+
+        content = request_llm_chat(
+            model="qwen3:14b",
+            messages=[{"role": "user", "content": "Hello"}],
+            langfuse_session_id="conversation-1",
+            langfuse_user_id="user-1",
+            langfuse_metadata={"message_id": 10},
+        )
+
+        self.assertEqual(content, "Hello from Qwen")
+        mock_request_ollama_chat.assert_called_once_with(
+            model="qwen3:14b",
+            messages=[{"role": "user", "content": "Hello"}],
+            langfuse_session_id="conversation-1",
+            langfuse_user_id="user-1",
+            langfuse_metadata={"message_id": 10},
+        )
+
+    @patch("api.services.propagate_attributes")
+    @patch("api.services._build_ollama_client")
+    def test_request_ollama_chat_calls_openai_compatible_chat_api(
+        self,
+        mock_build_client,
+        mock_propagate_attributes,
+    ):
+        mock_client = mock_build_client.return_value
+        mock_client.chat.completions.create.return_value = _FakeCompletion(" Hello from Ollama ")
+        mock_propagate_attributes.return_value = nullcontext()
+
+        content = request_ollama_chat(
+            model="qwen3:14b",
+            messages=[{"role": "user", "content": "Hello"}],
+            langfuse_session_id="conversation-1",
+            langfuse_user_id="user-1",
+            langfuse_metadata={"message_id": 10},
+        )
+
+        self.assertEqual(content, "Hello from Ollama")
+        mock_build_client.assert_called_once_with("qwen3:14b")
+        mock_propagate_attributes.assert_called_once_with(
+            trace_name="ollama-chat-completion",
+            tags=["gptclone", "ollama", "qwen3:14b"],
+            metadata={
+                "provider": "ollama",
+                "model": "qwen3:14b",
+                "message_id": "10",
+            },
+            session_id="conversation-1",
+            user_id="user-1",
+        )
+        mock_client.chat.completions.create.assert_called_once_with(
+            model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
         )
@@ -154,6 +260,35 @@ class VllmServiceTests(SimpleTestCase):
         self.assertEqual(chunks, ["Hello", " from vLLM"])
         mock_client.chat.completions.create.assert_called_once_with(
             model="gpt-oss-20b",
+            messages=[{"role": "user", "content": "Hello"}],
+            stream=True,
+        )
+
+    @patch("api.services.propagate_attributes")
+    @patch("api.services._build_ollama_client")
+    def test_stream_ollama_chat_yields_assistant_deltas(
+        self,
+        mock_build_client,
+        mock_propagate_attributes,
+    ):
+        mock_client = mock_build_client.return_value
+        mock_client.chat.completions.create.return_value = [
+            _FakeStreamChunk("Hello"),
+            _FakeStreamChunk(None),
+            _FakeStreamChunk(" from Ollama"),
+        ]
+        mock_propagate_attributes.return_value = nullcontext()
+
+        chunks = list(
+            stream_ollama_chat(
+                model="qwen3:14b",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+        )
+
+        self.assertEqual(chunks, ["Hello", " from Ollama"])
+        mock_client.chat.completions.create.assert_called_once_with(
+            model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=True,
         )
@@ -345,11 +480,11 @@ class ConversationAuthorizationTests(TestCase):
             ["Message 0"],
         )
 
-    @patch("api.views.stream_vllm_chat")
-    def test_streaming_message_returns_deltas_and_persists_assistant(self, mock_stream_vllm_chat):
+    @patch("api.views.stream_llm_chat")
+    def test_streaming_message_returns_deltas_and_persists_assistant(self, mock_stream_llm_chat):
         self.authenticate(self.user)
         conversation = Conversation.objects.create(user=self.user)
-        mock_stream_vllm_chat.return_value = ["Hello", " stream"]
+        mock_stream_llm_chat.return_value = ["Hello", " stream"]
 
         response = self.client.post(
             f"/api/conversations/{conversation.id}/messages/",
@@ -377,8 +512,8 @@ class ConversationAuthorizationTests(TestCase):
             ).exists()
         )
 
-    @patch("api.views.stream_vllm_chat")
-    def test_regenerate_latest_assistant_replaces_only_that_response(self, mock_stream_vllm_chat):
+    @patch("api.views.stream_llm_chat")
+    def test_regenerate_latest_assistant_replaces_only_that_response(self, mock_stream_llm_chat):
         self.authenticate(self.user)
         conversation = Conversation.objects.create(user=self.user)
         first_user = Message.objects.create(
@@ -391,7 +526,7 @@ class ConversationAuthorizationTests(TestCase):
             role=Message.Role.ASSISTANT,
             content="Old answer",
         )
-        mock_stream_vllm_chat.return_value = ["New", " answer"]
+        mock_stream_llm_chat.return_value = ["New", " answer"]
 
         response = self.client.post(
             f"/api/conversations/{conversation.id}/messages/{latest_assistant.id}/regenerate/",
@@ -411,8 +546,8 @@ class ConversationAuthorizationTests(TestCase):
         self.assertEqual([message.content for message in stored_messages], ["Explain this", "New answer"])
         self.assertEqual(stored_messages[0].id, first_user.id)
 
-    @patch("api.views.stream_vllm_chat")
-    def test_regenerate_rejects_non_latest_assistant_without_deleting_messages(self, mock_stream_vllm_chat):
+    @patch("api.views.stream_llm_chat")
+    def test_regenerate_rejects_non_latest_assistant_without_deleting_messages(self, mock_stream_llm_chat):
         self.authenticate(self.user)
         conversation = Conversation.objects.create(user=self.user)
         Message.objects.create(
@@ -444,7 +579,7 @@ class ConversationAuthorizationTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("Only the latest assistant message", response.data["detail"])
-        mock_stream_vllm_chat.assert_not_called()
+        mock_stream_llm_chat.assert_not_called()
 
         stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
         self.assertEqual(
@@ -515,8 +650,8 @@ class ConversationAuthorizationTests(TestCase):
         self.assertEqual(response.data["detail"], "Only assistant responses can be forked.")
         self.assertEqual(Conversation.objects.count(), 1)
 
-    @patch("api.views.stream_vllm_chat")
-    def test_edit_user_request_replaces_tail_and_streams_new_response(self, mock_stream_vllm_chat):
+    @patch("api.views.stream_llm_chat")
+    def test_edit_user_request_replaces_tail_and_streams_new_response(self, mock_stream_llm_chat):
         self.authenticate(self.user)
         conversation = Conversation.objects.create(user=self.user, title="Original chat")
         edited_user = Message.objects.create(
@@ -534,7 +669,7 @@ class ConversationAuthorizationTests(TestCase):
             role=Message.Role.USER,
             content="Later question",
         )
-        mock_stream_vllm_chat.return_value = ["New", " answer"]
+        mock_stream_llm_chat.return_value = ["New", " answer"]
 
         response = self.client.post(
             f"/api/conversations/{conversation.id}/messages/{edited_user.id}/edit/",
@@ -553,8 +688,8 @@ class ConversationAuthorizationTests(TestCase):
         stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
         self.assertEqual([message.content for message in stored_messages], ["Edited question", "New answer"])
 
-    @patch("api.views.stream_vllm_chat")
-    def test_edit_rejects_assistant_response_without_deleting_messages(self, mock_stream_vllm_chat):
+    @patch("api.views.stream_llm_chat")
+    def test_edit_rejects_assistant_response_without_deleting_messages(self, mock_stream_llm_chat):
         self.authenticate(self.user)
         conversation = Conversation.objects.create(user=self.user)
         Message.objects.create(
@@ -576,6 +711,6 @@ class ConversationAuthorizationTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["detail"], "Only user requests can be edited.")
-        mock_stream_vllm_chat.assert_not_called()
+        mock_stream_llm_chat.assert_not_called()
         stored_messages = list(Message.objects.filter(conversation=conversation).order_by("created_at", "id"))
         self.assertEqual([message.content for message in stored_messages], ["Question", "Answer"])

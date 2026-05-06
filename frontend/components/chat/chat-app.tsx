@@ -14,7 +14,6 @@ import {
   LogOut,
   Menu,
   MessageSquare,
-  Mic,
   Moon,
   MoreHorizontal,
   PanelLeftClose,
@@ -94,6 +93,12 @@ const MODEL_OPTIONS = [
     id: "gpt-oss-20b",
     label: "GPTClone 20B",
     description: "Default local vLLM model",
+    enabled: true,
+  },
+  {
+    id: "qwen3:14b",
+    label: "Qwen3 14B",
+    description: "Local Ollama model",
     enabled: true,
   },
   {
@@ -874,6 +879,23 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
   }, [openMessageMenuId]);
+
+  useEffect(() => {
+    if (!isProfileMenuOpen && !isSidebarProfileMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest("[data-profile-menu]")) {
+        setIsProfileMenuOpen(false);
+        setIsSidebarProfileMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [isProfileMenuOpen, isSidebarProfileMenuOpen]);
 
   useEffect(() => {
     if (!authSession || isSendingRef.current) {
@@ -2845,7 +2867,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             ) : null}
           </ScrollArea>
 
-          <div className={cn("relative border-t p-3", isDark ? "border-[#242424]" : "border-[#e9e9e9]")}>
+          <div className={cn("relative border-t p-3", isDark ? "border-[#242424]" : "border-[#e9e9e9]")} data-profile-menu>
             <button
               type="button"
               onClick={() => {
@@ -2974,7 +2996,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
               >
                 <Settings className="h-5 w-5" />
               </button>
-              <div className="relative">
+              <div className="relative" data-profile-menu>
                 <button
                   type="button"
                   onClick={() => {
@@ -3007,9 +3029,9 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             <ScrollArea
               ref={chatScrollAreaRef}
               onScroll={handleChatScroll}
-              className="h-full min-h-0"
+              className="h-full min-h-0 overflow-x-hidden"
             >
-              <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-4 py-8 md:px-6">
+              <div className="mx-auto flex min-h-full w-full min-w-0 max-w-3xl flex-col px-3 py-6 sm:px-4 md:px-6 md:py-8">
               {!isAuthenticated ? (
                 <div className="flex flex-1 items-center justify-center">
                   <form
@@ -3159,7 +3181,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                   </form>
                 </div>
               ) : (
-                <div className="flex flex-1 flex-col">
+                <div className="flex min-w-0 flex-1 flex-col">
                   {!activeConversation?.messages.length ? (
                     <div className="flex flex-1 flex-col items-center justify-center pb-28 text-center">
                       <div
@@ -3173,37 +3195,25 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                       <h1 className="text-3xl font-semibold md:text-4xl">What can I help with?</h1>
                     </div>
                   ) : (
-                    <div className="space-y-8 pb-36">
+                    <div className="min-w-0 space-y-8 pb-36">
                       {activeConversation.messages.map((message) => (
                         <div
                           key={message.id}
                           className={cn(
-                            "flex gap-4",
+                            "flex w-full min-w-0",
                             message.role === "user" ? "justify-end" : "justify-start",
                           )}
                         >
-                          {message.role !== "user" ? (
-                            <div
-                              className={cn(
-                                "mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-full",
-                                isDark ? "bg-[#303030]" : "bg-[#f1f1f1]",
-                              )}
-                            >
-                              <Bot className="h-4 w-4" />
-                            </div>
-                          ) : null}
-
                           <div
                             className={cn(
-                              "flex max-w-[82%] flex-col",
-                              editingMessageId === message.id ? "w-full max-w-[704px]" : "",
+                              "flex min-w-0 w-full flex-col",
                               message.role === "user" ? "items-end" : "items-start",
                             )}
                           >
                             {editingMessageId === message.id && message.role === "user" ? (
                               <div
                                 className={cn(
-                                  "w-full rounded-[28px] px-5 py-4",
+                                  "w-full max-w-[78%] rounded-[28px] px-5 py-4 sm:max-w-[64%] md:max-w-[58%]",
                                   isDark ? "bg-[#303030]" : "bg-[#f4f4f4]",
                                 )}
                               >
@@ -3259,12 +3269,12 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                               <div
                                 dir="auto"
                                 className={cn(
-                                  "text-base leading-7",
+                                  "min-w-0 max-w-full text-base leading-7",
                                   message.role === "user"
                                     ? isDark
-                                      ? "rounded-3xl bg-[#303030] px-5 py-3"
-                                      : "rounded-3xl bg-[#f4f4f4] px-5 py-3"
-                                    : "",
+                                      ? "w-fit max-w-[78%] rounded-3xl bg-[#303030] px-5 py-3 sm:max-w-[64%] md:max-w-[58%]"
+                                      : "w-fit max-w-[78%] rounded-3xl bg-[#f4f4f4] px-5 py-3 sm:max-w-[64%] md:max-w-[58%]"
+                                    : "w-full",
                                 )}
                               >
                                 <div className="chat-message-content" dir="auto">
@@ -3311,95 +3321,84 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             ) : null}
           </div>
 
-          {isAuthenticated ? (
-            <div className="shrink-0 px-3 pb-4 md:px-4">
-              <form
-                onSubmit={handleSendMessage}
-                className={cn(
-                  "mx-auto flex w-full max-w-[768px] items-end gap-2 rounded-[28px] border px-3 py-2 shadow-sm",
-                  isDark
-                    ? "border-[#3b3b3b] bg-[#303030] text-[#ececec]"
-                    : "border-[#d9d9d9] bg-white text-[#171717]",
-                )}
-              >
-                <button
-                  type="button"
-                  className={cn(
-                    "grid h-9 w-9 shrink-0 place-items-center rounded-full transition",
-                    isDark ? "text-[#f4f4f4] hover:bg-[#3f3f3f]" : "text-[#2f2f2f] hover:bg-[#f2f2f2]",
-                  )}
-                  aria-label="Attach file"
-                >
-                  <Plus className="h-5 w-5" />
-                </button>
-                <Textarea
-                  ref={draftTextareaRef}
-                  value={draft}
-                  onChange={(event) => {
-                    setDraft(event.target.value);
-                    window.requestAnimationFrame(resizeDraftTextarea);
-                  }}
-                  placeholder="Ask anything"
-                  dir="auto"
-                  className={cn(
-                    "!min-h-9 max-h-44 resize-none overflow-hidden !rounded-none !border-0 !bg-transparent !px-0 !py-2 text-base leading-6 !shadow-none outline-none focus-visible:!ring-0",
-                    isDark
-                      ? "!text-[#f4f4f4] !placeholder:text-[#c5c5c5]"
-                      : "!text-[#171717] !placeholder:text-[#6b6b6b]",
-                  )}
-                  rows={1}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className={cn(
-                    "grid h-9 w-9 shrink-0 place-items-center rounded-full transition",
-                    isDark ? "text-[#f4f4f4] hover:bg-[#3f3f3f]" : "text-[#2f2f2f] hover:bg-[#f2f2f2]",
-                  )}
-                  aria-label="Voice input"
-                >
-                  <Mic className="h-[18px] w-[18px]" />
-                </button>
-                <button
-                  type="submit"
-                  disabled={!draft.trim() && !isSending}
-                  onClick={(event) => {
-                    if (isSending) {
-                      event.preventDefault();
-                      streamAbortControllerRef.current?.abort();
-                    }
-                  }}
-                  className={cn(
-                    "grid h-9 w-9 shrink-0 place-items-center rounded-full transition disabled:cursor-not-allowed",
-                    draft.trim() || isSending
-                      ? "bg-[#4668d9] text-white hover:bg-[#5577ea]"
-                      : isDark
-                        ? "bg-[#424242] text-[#a8a8a8]"
-                        : "bg-[#d7d7d7] text-[#777777]",
-                  )}
-                  aria-label={isSending ? "Stop response" : "Send message"}
-                >
-                  {isSending ? <X className="h-5 w-5" /> : <ArrowUp className="h-5 w-5" />}
-                </button>
-              </form>
-              <div
-                className={cn(
-                  "mx-auto mt-2 max-w-[768px] text-center text-xs leading-4",
-                  isDark ? "text-[#d1d1d1]" : "text-[#5f5f5f]",
-                )}
-              >
-                ChatGPT can make mistakes. Check important info.{" "}
-                <button type="button" className="underline underline-offset-2">
-                  See Cookie Preferences.
-                </button>
+            {isAuthenticated ? (
+              <div className="shrink-0 pb-4">
+                <div className="mx-auto w-full max-w-3xl px-3 sm:px-4 md:px-6">
+                  <form
+                    onSubmit={handleSendMessage}
+                    className={cn(
+                      "flex w-full items-end gap-2 rounded-[28px] border px-3 py-2 shadow-sm",
+                      isDark
+                        ? "border-[#3b3b3b] bg-[#303030] text-[#ececec]"
+                        : "border-[#d9d9d9] bg-white text-[#171717]",
+                    )}
+                  >
+                    <button
+                      type="button"
+                      className={cn(
+                        "grid h-9 w-9 shrink-0 place-items-center rounded-full transition",
+                        isDark ? "text-[#f4f4f4] hover:bg-[#3f3f3f]" : "text-[#2f2f2f] hover:bg-[#f2f2f2]",
+                      )}
+                      aria-label="Attach file"
+                    >
+                      <Plus className="h-5 w-5" />
+                    </button>
+                    <Textarea
+                      ref={draftTextareaRef}
+                      value={draft}
+                      onChange={(event) => {
+                        setDraft(event.target.value);
+                        window.requestAnimationFrame(resizeDraftTextarea);
+                      }}
+                      placeholder="Ask anything"
+                      dir="auto"
+                      className={cn(
+                        "!min-h-9 max-h-44 resize-none overflow-hidden !rounded-none !border-0 !bg-transparent !px-0 !py-2 text-base leading-6 !shadow-none outline-none focus-visible:!ring-0",
+                        isDark
+                          ? "!text-[#f4f4f4] !placeholder:text-[#c5c5c5]"
+                          : "!text-[#171717] !placeholder:text-[#6b6b6b]",
+                      )}
+                      rows={1}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          event.currentTarget.form?.requestSubmit();
+                        }
+                      }}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!draft.trim() && !isSending}
+                      onClick={(event) => {
+                        if (isSending) {
+                          event.preventDefault();
+                          streamAbortControllerRef.current?.abort();
+                        }
+                      }}
+                      className={cn(
+                        "grid h-9 w-9 shrink-0 place-items-center rounded-full transition disabled:cursor-not-allowed",
+                        draft.trim() || isSending
+                          ? "bg-[#4668d9] text-white hover:bg-[#5577ea]"
+                          : isDark
+                            ? "bg-[#424242] text-[#a8a8a8]"
+                            : "bg-[#d7d7d7] text-[#777777]",
+                      )}
+                      aria-label={isSending ? "Stop response" : "Send message"}
+                    >
+                      {isSending ? <X className="h-5 w-5" /> : <ArrowUp className="h-5 w-5" />}
+                    </button>
+                  </form>
+                  <div
+                    className={cn(
+                      "mt-2 w-full text-center text-xs leading-4",
+                      isDark ? "text-[#d1d1d1]" : "text-[#5f5f5f]",
+                    )}
+                  >
+                    GPTClone can make mistakes. Check important info. See Cookie Preferences.
+                  </div>
+                </div>
               </div>
-            </div>
-          ) : null}
+            ) : null}
 
           {error ? (
             <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-full bg-[#ef4444] px-4 py-2 text-sm text-white shadow-lg">

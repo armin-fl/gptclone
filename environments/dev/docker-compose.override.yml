@@ -1,4 +1,29 @@
 services:
+  ollama-qwen3-14b:
+    image: ollama/ollama:latest
+    container_name: ollama-qwen3-14b-dev
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_MODELS: /root/.ollama/models
+      OLLAMA_KEEP_ALIVE: 10m
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ../../models/Ollama/Qwen3-14b:/root/.ollama/models
+    healthcheck:
+      test: ["CMD-SHELL", "OLLAMA_HOST=127.0.0.1:11434 ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   vllm-gpt-oss-20b:
     image: vllm:gptclone
     container_name: vllm-gpt-oss-20b-dev

@@ -136,6 +136,34 @@ VLLM_MODELS = {
 }
 VLLM_TIMEOUT_SECONDS = 120
 
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:14b")
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_MODELS = {
+    OLLAMA_MODEL: OLLAMA_BASE_URL,
+}
+OLLAMA_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "300"))
+
+LLM_MODEL = os.environ.get("LLM_MODEL", VLLM_MODEL)
+LLM_MODELS = {
+    **{
+        model: {
+            "provider": "vllm",
+            "base_url": base_url,
+            "label": model,
+        }
+        for model, base_url in VLLM_MODELS.items()
+    },
+    **{
+        model: {
+            "provider": "ollama",
+            "base_url": base_url,
+            "label": "Qwen3 14B",
+        }
+        for model, base_url in OLLAMA_MODELS.items()
+    },
+}
+
 LANGFUSE_BASE_URL = os.environ.get("LANGFUSE_BASE_URL", "http://127.0.0.1:3001")
 LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "pk-lf-dev-project-key")
 LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "sk-lf-dev-secret-key")

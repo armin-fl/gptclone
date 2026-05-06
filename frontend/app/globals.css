@@ -104,6 +104,8 @@ body {
 
 .chat-message-content,
 .chat-message {
+  max-width: 100%;
+  min-width: 0;
   unicode-bidi: plaintext;
 }
 
@@ -111,6 +113,7 @@ body {
   line-height: 1.9;
   overflow-wrap: anywhere;
   text-align: start;
+  width: 100%;
 }
 
 .chat-message :where(p, li, blockquote, h1, h2, h3, h4, h5, h6, td, th) {
@@ -184,9 +187,12 @@ body {
   color: #f4f4f4;
   font-size: 0.875rem;
   line-height: 1.65;
+  max-width: 100%;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   padding: 1rem;
   text-align: left;
+  -webkit-overflow-scrolling: touch;
   white-space: pre;
 }
 
@@ -209,14 +215,22 @@ body {
 }
 
 .chat-message-table-wrapper {
+  display: block;
   margin-block: 0.9rem;
   max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  padding-block-end: 0.25rem;
+  -webkit-overflow-scrolling: touch;
+  width: 100%;
 }
 
 .chat-message-table {
   border-collapse: collapse;
   direction: inherit;
+  max-width: none;
   min-width: 100%;
   width: max-content;
 }
@@ -224,8 +238,11 @@ body {
 .chat-message-table-header,
 .chat-message-table-cell {
   border: 1px solid rgba(127, 127, 127, 0.32);
+  min-width: 9rem;
+  overflow-wrap: normal;
   padding: 0.7rem 0.85rem;
   vertical-align: top;
+  word-break: normal;
 }
 
 .chat-message-table-header {
@@ -244,8 +261,11 @@ body {
 .chat-message .katex-display {
   direction: ltr;
   margin-inline: 0;
+  max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
+  overscroll-behavior-x: contain;
   padding: 0.75rem 0;
   text-align: center;
+  -webkit-overflow-scrolling: touch;
 }
