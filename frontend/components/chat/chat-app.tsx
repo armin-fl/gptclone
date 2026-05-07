@@ -764,18 +764,6 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const applyModelStatuses = useCallback((models: LlmModelStatus[]) => {
     const statusesById = Object.fromEntries(models.map((model) => [model.id, model]));
     setModelStatuses(statusesById);
-    setSelectedModel((currentModel) => {
-      const currentOption = MODEL_OPTIONS.find((model) => model.id === currentModel);
-      const currentStatus = statusesById[currentModel];
-      if (!currentOption?.enabled || !currentStatus || currentStatus.available) {
-        return currentModel;
-      }
-
-      return (
-        MODEL_OPTIONS.find((model) => model.enabled && statusesById[model.id]?.available)?.id
-        ?? currentModel
-      );
-    });
   }, []);
 
   const refreshModelStatuses = useCallback(async () => {

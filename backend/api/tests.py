@@ -14,6 +14,12 @@ from requests import RequestException
 
 from accounts.models import User
 from api.models import Conversation, Message
+from .model_runtime import (
+    ACTIVE_VLLM_MODEL_KEY,
+    _inflight_cache_key,
+    _inflight_count,
+    managed_vllm_model,
+)
 from .services import (
     UnsupportedLlmModelError,
     UnsupportedVllmModelError,
@@ -77,6 +83,81 @@ class VllmServiceTests(SimpleTestCase):
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
         self.assertTrue(serializer.validated_data["thinking_enabled"])
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
+        },
+    )
+    @patch("api.model_runtime._switch_vllm_model")
+    @patch("api.model_runtime._container_running")
+    def test_managed_vllm_model_allows_nested_same_model_requests(
+        self,
+        mock_container_running,
+        mock_switch_vllm_model,
+    ):
+        cache.set(ACTIVE_VLLM_MODEL_KEY, "model-1", timeout=None)
+        mock_container_running.return_value = True
+
+        with managed_vllm_model("model-1"):
+            self.assertEqual(_inflight_count("model-1"), 1)
+            with managed_vllm_model("model-1"):
+                self.assertEqual(_inflight_count("model-1"), 2)
+            self.assertEqual(_inflight_count("model-1"), 1)
+
+        self.assertEqual(_inflight_count("model-1"), 0)
+        mock_switch_vllm_model.assert_not_called()
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
+            "model-2": {
+                "service_name": "vllm-model-2",
+                "container_name": "vllm-model-2-dev",
+            },
+        },
+        VLLM_MODELS={
+            "model-1": "http://127.0.0.1:8101/v1",
+            "model-2": "http://127.0.0.1:8102/v1",
+        },
+        VLLM_INFLIGHT_DRAIN_TIMEOUT_SECONDS=5,
+        VLLM_RUNTIME_POLL_SECONDS=0.01,
+    )
+    @patch("api.model_runtime._wait_for_vllm_ready")
+    @patch("api.model_runtime._start_container")
+    @patch("api.model_runtime._stop_container")
+    @patch("api.model_runtime._container_running")
+    @patch("api.model_runtime.time.sleep")
+    def test_switch_waits_for_other_model_inflight_requests_to_finish(
+        self,
+        mock_sleep,
+        mock_container_running,
+        mock_stop_container,
+        mock_start_container,
+        mock_wait_for_vllm_ready,
+    ):
+        cache.set(ACTIVE_VLLM_MODEL_KEY, "model-1", timeout=None)
+        cache.set(_inflight_cache_key("model-1"), 1, timeout=None)
+        mock_container_running.return_value = True
+        mock_sleep.side_effect = lambda _seconds: cache.set(_inflight_cache_key("model-1"), 0)
+
+        with managed_vllm_model("model-2"):
+            self.assertEqual(cache.get(ACTIVE_VLLM_MODEL_KEY), "model-2")
+            self.assertEqual(_inflight_count("model-2"), 1)
+
+        self.assertEqual(_inflight_count("model-2"), 0)
+        mock_sleep.assert_called()
+        mock_stop_container.assert_called_once_with("vllm-model-1-dev")
+        mock_start_container.assert_not_called()
+        mock_wait_for_vllm_ready.assert_called_once_with("model-2")
 
     def test_get_available_vllm_models_returns_hardcoded_models(self):
         self.assertEqual(

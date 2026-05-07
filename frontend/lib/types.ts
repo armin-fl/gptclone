@@ -37,6 +37,8 @@ export interface LlmModelStatus {
   label: string;
   provider: string;
   supports_thinking_toggle: boolean;
+  managed?: boolean;
+  running?: boolean;
   available: boolean;
   reason?: string;
 }

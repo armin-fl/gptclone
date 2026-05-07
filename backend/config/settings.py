@@ -5,6 +5,14 @@ import sys
 from datetime import timedelta
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_DIR = os.path.dirname(BASE_DIR)
+
+
+def env_bool(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).lower() in {"1", "true", "yes", "on"}
+
+
+IS_TEST_COMMAND = any("pytest" in arg or arg == "test" for arg in sys.argv)
 
 SECRET_KEY = "dev-only-secret-key-change-me"
 DEBUG = True
@@ -142,6 +150,38 @@ VLLM_MODEL_CONTEXT_TOKENS = {
     "qwq-32b-awq": int(os.environ.get("VLLM_QWQ_32B_AWQ_CONTEXT_TOKENS", "40960")),
 }
 VLLM_TIMEOUT_SECONDS = 120
+VLLM_MODEL_CONTAINERS = {
+    "gpt-oss-20b": {
+        "service_name": "vllm-gpt-oss-20b",
+        "container_name": "vllm-gpt-oss-20b-dev",
+    },
+    "qwen3-32b-awq": {
+        "service_name": "vllm-qwen3-32b-awq",
+        "container_name": "vllm-qwen3-32b-awq-dev",
+    },
+    "qwq-32b-awq": {
+        "service_name": "vllm-qwq-32b-awq",
+        "container_name": "vllm-qwq-32b-awq-dev",
+    },
+}
+VLLM_AUTO_SWITCH_ENABLED = env_bool(
+    "VLLM_AUTO_SWITCH_ENABLED",
+    "0" if IS_TEST_COMMAND else "1",
+)
+VLLM_DOCKER_COMPOSE_DIR = os.environ.get(
+    "VLLM_DOCKER_COMPOSE_DIR",
+    os.path.join(PROJECT_DIR, "environments", "dev"),
+)
+VLLM_DOCKER_COMPOSE_COMMAND = os.environ.get("VLLM_DOCKER_COMPOSE_COMMAND", "docker compose")
+VLLM_DOCKER_COMMAND_TIMEOUT_SECONDS = float(os.environ.get("VLLM_DOCKER_COMMAND_TIMEOUT_SECONDS", "30"))
+VLLM_DOCKER_START_TIMEOUT_SECONDS = float(os.environ.get("VLLM_DOCKER_START_TIMEOUT_SECONDS", "180"))
+VLLM_CONTAINER_STOP_GRACE_SECONDS = int(os.environ.get("VLLM_CONTAINER_STOP_GRACE_SECONDS", "10"))
+VLLM_CONTAINER_STOP_TIMEOUT_SECONDS = float(os.environ.get("VLLM_CONTAINER_STOP_TIMEOUT_SECONDS", "60"))
+VLLM_MODEL_START_TIMEOUT_SECONDS = float(os.environ.get("VLLM_MODEL_START_TIMEOUT_SECONDS", "900"))
+VLLM_GPU_LOCK_WAIT_TIMEOUT_SECONDS = float(os.environ.get("VLLM_GPU_LOCK_WAIT_TIMEOUT_SECONDS", "900"))
+VLLM_GPU_LOCK_TTL_SECONDS = int(os.environ.get("VLLM_GPU_LOCK_TTL_SECONDS", "7200"))
+VLLM_INFLIGHT_DRAIN_TIMEOUT_SECONDS = float(os.environ.get("VLLM_INFLIGHT_DRAIN_TIMEOUT_SECONDS", "7200"))
+VLLM_RUNTIME_POLL_SECONDS = float(os.environ.get("VLLM_RUNTIME_POLL_SECONDS", "1.0"))
 LLM_MODEL_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("LLM_MODEL_HEALTH_TIMEOUT_SECONDS", "0.8"))
 LLM_MODEL_HEALTH_CACHE_SECONDS = int(os.environ.get("LLM_MODEL_HEALTH_CACHE_SECONDS", "5"))
 

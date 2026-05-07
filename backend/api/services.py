@@ -9,6 +9,8 @@ from langfuse.openai import OpenAI as LangfuseOpenAI
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAIError
 from requests import RequestException
 
+from .model_runtime import is_managed_vllm_model, managed_vllm_model, vllm_auto_switch_enabled
+
 
 class UnsupportedLlmModelError(RuntimeError):
     pass
@@ -119,6 +121,8 @@ def get_llm_model_status(model: str) -> dict:
     if cached is not None:
         return cached
 
+    provider = ""
+    server_reachable = False
     try:
         config = get_llm_model_config(model)
         provider = str(config.get("provider", ""))
@@ -131,6 +135,7 @@ def get_llm_model_status(model: str) -> dict:
             timeout=settings.LLM_MODEL_HEALTH_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
+        server_reachable = True
 
         is_available = True
         reason = ""
@@ -144,11 +149,18 @@ def get_llm_model_status(model: str) -> dict:
         is_available = False
         reason = str(exc)
 
+    is_managed = provider == "vllm" and is_managed_vllm_model(model)
+    if not is_available and not server_reachable and is_managed and vllm_auto_switch_enabled():
+        is_available = True
+        reason = "Model container is stopped. It will start automatically on first request."
+
     status = {
         "id": model,
         "label": str(settings.LLM_MODELS.get(model, {}).get("label", model)),
-        "provider": str(settings.LLM_MODELS.get(model, {}).get("provider", "")),
+        "provider": provider or str(settings.LLM_MODELS.get(model, {}).get("provider", "")),
         "supports_thinking_toggle": model_supports_thinking_toggle(model),
+        "managed": is_managed,
+        "running": server_reachable,
         "available": is_available,
         "reason": reason,
     }
@@ -454,7 +466,7 @@ def request_vllm_chat(
     )
 
     try:
-        with propagate_attributes(**trace_context):
+        with managed_vllm_model(model), propagate_attributes(**trace_context):
             completion = _build_vllm_client(model).chat.completions.create(
                 model=model,
                 messages=messages,
@@ -495,7 +507,7 @@ def stream_vllm_chat(
     )
 
     try:
-        with propagate_attributes(**trace_context):
+        with managed_vllm_model(model), propagate_attributes(**trace_context):
             stream = _build_vllm_client(model).chat.completions.create(
                 model=model,
                 messages=messages,

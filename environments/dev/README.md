@@ -1,8 +1,8 @@
 ## Development Docker Services
 
-This setup runs only infrastructure services:
+This setup runs infrastructure services by default:
 
-- vLLM OpenAI-compatible API servers
+- vLLM OpenAI-compatible API servers, started on demand by Django
 - Ollama local model servers
 - PostgreSQL
 - pgAdmin
@@ -21,7 +21,7 @@ cd environments/dev
 docker compose up -d
 ```
 
-vLLM model servers:
+vLLM model servers, cold-started automatically when selected:
 
 - `gpt-oss-20b`: `http://127.0.0.1:8001/v1`
 - `qwen3-32b-awq`: `http://127.0.0.1:8002/v1`
@@ -38,10 +38,10 @@ Langfuse:
 - Dev public key: `pk-lf-dev-project-key`
 - Dev secret key: `sk-lf-dev-secret-key`
 
-The vLLM service uses the pinned release image `vllm/vllm-openai:v0.19.1`.
-When Docker shows `vllm-gpt-oss-20b Pulling`, it is pulling the vLLM container
-image layers. The model is loaded from the local bind mount because the command
-uses `--model /models/gpt-oss-20b`, not `--model openai/gpt-oss-20b`.
+The vLLM services use the local `vllm:gptclone` image. When Docker shows
+`vllm-gpt-oss-20b Pulling`, it is pulling the vLLM container image layers. The
+model is loaded from the local bind mount because the command uses
+`--model /models/gpt-oss-20b`, not `--model openai/gpt-oss-20b`.
 
 vLLM exports OpenTelemetry traces to Langfuse at
 `http://langfuse-web:3000/api/public/otel/v1/traces`. The Django backend also
@@ -50,10 +50,14 @@ the request, response, model, conversation session id, and user id.
 Model containers do not hard-depend on the `langfuse-web` service, so the
 override file can still be rendered or used for model-only commands.
 
-The Django backend routes by the request `model` field. vLLM and Ollama models
-both use OpenAI-compatible chat completions, and the Django backend wraps both
-providers with Langfuse's OpenAI client so application-level traces include the
-request, response, model, conversation session id, and user id.
+The Django backend routes by the request `model` field. For vLLM models it also
+owns a single GPU slot: before a request, Django stops every other managed vLLM
+container, starts the requested container if needed, waits for `/models`, and
+then sends the completion. After the response finishes, the current container is
+left running so other requests for the same model can reuse the warm server and
+run concurrently. When a later request selects a different vLLM model, Django
+waits for current in-flight requests to finish before stopping the previous
+container and starting the new one.
 
 The current GPT-OSS model is loaded from `models/Vllm/OpenAI`. That directory is the
 Hugging Face/vLLM-ready model root with `config.json`, tokenizer files, chat
@@ -63,12 +67,17 @@ template, the safetensors index, and safetensors shards. The nested
 The Qwen3 32B AWQ and QwQ 32B AWQ vLLM models are loaded from
 `models/Vllm/Qwen3-32B-AWQ` and `models/Vllm/QwQ-32B-AWQ`.
 Their vLLM containers use the model context window: `--max-model-len 40960`,
-`--kv-cache-dtype fp8`, `--max-num-seqs 1`, `--enforce-eager`, and
+`--kv-cache-dtype fp8`, `--max-num-seqs ${VLLM_32B_MAX_NUM_SEQS:-2}`, `--enforce-eager`, and
 `--gpu-memory-utilization 0.82`. CPU model offload is explicitly disabled with
 `--cpu-offload-gb 0` and `--offload-group-size 0`; vLLM still uses CPU for
-normal orchestration, tokenization, networking, and process scheduling. The 32B
-services are profile-gated because a single 32 GB GPU cannot run both 32B AWQ
-servers at the same time.
+normal orchestration, tokenization, networking, and process scheduling. vLLM
+services are profile-gated so `docker compose up -d` does not load every model
+into VRAM.
+Set `VLLM_32B_MAX_NUM_SEQS` before starting a 32B service to tune same-model
+parallelism. The default is `2`; use `1` if the GPU runs out of memory, or a
+higher value if the model and context length fit comfortably.
+Existing running containers must be recreated before a changed `max-num-seqs`
+value takes effect.
 
 The current Qwen model is loaded from `models/Ollama/Qwen3-14b`. That directory
 is mounted as Ollama's `/root/.ollama/models` store, so the existing
@@ -89,6 +98,7 @@ services:
   vllm-new-model:
     image: vllm/vllm-openai:v0.19.1
     container_name: vllm-new-model-dev
+    profiles: ["new-model-name"]
     restart: unless-stopped
     ipc: host
     ports:
@@ -118,6 +128,16 @@ VLLM_MODELS = {
     "gpt-oss-20b": "http://127.0.0.1:8001/v1",
     "new-model-name": "http://127.0.0.1:8003/v1",
 }
+VLLM_MODEL_CONTAINERS = {
+    "gpt-oss-20b": {
+        "service_name": "vllm-gpt-oss-20b",
+        "container_name": "vllm-gpt-oss-20b-dev",
+    },
+    "new-model-name": {
+        "service_name": "vllm-new-model",
+        "container_name": "vllm-new-model-dev",
+    },
+}
 ```
 
 To add another Ollama model already stored on disk, add another Ollama service
@@ -136,18 +156,18 @@ command:
   - http://langfuse-web:3000/api/public/otel/v1/traces
 ```
 
-Start or recreate only that model container:
+Start or recreate only that model container manually when troubleshooting:
 
 ```bash
 docker compose up -d --force-recreate vllm-new-model
 ```
 
 You can choose any enabled backend model from the chat UI model selector.
-Stopped model containers appear disabled in the selector.
+Managed stopped vLLM containers remain selectable and start automatically.
 Backend chat completions request the maximum remaining context for each model,
 capped by `LLM_MAX_COMPLETION_TOKENS`, which defaults to `131072`.
 
-Start one 32B AWQ model at a time:
+Manual one-at-a-time switching still works:
 
 ```bash
 docker compose up -d vllm-qwen3-32b-awq

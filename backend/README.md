@@ -56,6 +56,12 @@ VLLM_MODEL_CONTEXT_TOKENS = {
     "qwq-32b-awq": 40960,
 }
 VLLM_TIMEOUT_SECONDS = 120
+VLLM_AUTO_SWITCH_ENABLED = True
+VLLM_MODEL_CONTAINERS = {
+    "gpt-oss-20b": {"service_name": "vllm-gpt-oss-20b", "container_name": "vllm-gpt-oss-20b-dev"},
+    "qwen3-32b-awq": {"service_name": "vllm-qwen3-32b-awq", "container_name": "vllm-qwen3-32b-awq-dev"},
+    "qwq-32b-awq": {"service_name": "vllm-qwq-32b-awq", "container_name": "vllm-qwq-32b-awq-dev"},
+}
 OLLAMA_MODEL = "qwen3:14b"
 OLLAMA_API_KEY = "ollama"
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
@@ -81,6 +87,12 @@ OTP_MAX_ATTEMPTS = 5
 
 The Langfuse SDK reads those values from environment variables if set, otherwise
 the dev defaults above match `environments/dev/docker-compose.yml`.
+With `VLLM_AUTO_SWITCH_ENABLED`, each vLLM request owns one GPU slot: Django
+stops other managed vLLM containers, starts the requested one, waits until the
+OpenAI-compatible `/models` endpoint is ready, then leaves that container warm
+for concurrent requests using the same model. A request for a different vLLM
+model waits for current in-flight requests to finish before stopping the active
+container and starting the new one.
 
 ### Migrations and superuser
 
