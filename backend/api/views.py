@@ -1,4 +1,5 @@
 import json
+import time
 
 from django.conf import settings
 from django.db import transaction
@@ -32,6 +33,7 @@ from .services import (
     build_history_as_system_message,
     get_available_llm_models,
     get_llm_model_statuses,
+    has_thinking_content,
     request_llm_chat,
     stream_llm_chat,
 )
@@ -55,6 +57,30 @@ def _build_fork_title(title: str) -> str:
 
 def _stream_event(event: dict) -> bytes:
     return f"{json.dumps(event)}\n".encode("utf-8")
+
+
+class ThinkingDurationTracker:
+    def __init__(self):
+        self._started_at: float | None = None
+        self.thinking_duration_ms: int | None = None
+
+    def observe(self, content: str) -> None:
+        if self.thinking_duration_ms is not None:
+            return
+
+        lower_content = content.lower()
+        if self._started_at is None:
+            if "<think" not in lower_content:
+                return
+            self._started_at = time.monotonic()
+
+        if "</think>" in lower_content:
+            self.finish()
+
+    def finish(self) -> None:
+        if self._started_at is None or self.thinking_duration_ms is not None:
+            return
+        self.thinking_duration_ms = max(0, round((time.monotonic() - self._started_at) * 1000))
 
 
 class LlmModelListView(APIView):
@@ -157,10 +183,18 @@ class ConversationSendMessageView(APIView):
         response_data["active_model"] = model
         return response_data
 
-    def _save_assistant_reply(self, conversation_id, assistant_reply: str, model: str) -> dict | None:
+    def _save_assistant_reply(
+        self,
+        conversation_id,
+        assistant_reply: str,
+        model: str,
+        thinking_duration_ms: int | None = None,
+    ) -> dict | None:
         clean_reply = assistant_reply.strip()
         if not clean_reply:
             return None
+        if not has_thinking_content(clean_reply):
+            thinking_duration_ms = None
 
         with transaction.atomic():
             conversation = Conversation.objects.select_for_update().get(id=conversation_id)
@@ -168,6 +202,7 @@ class ConversationSendMessageView(APIView):
                 conversation=conversation,
                 role=Message.Role.ASSISTANT,
                 content=clean_reply,
+                thinking_duration_ms=thinking_duration_ms,
             )
 
             if conversation.title == Conversation.DEFAULT_TITLE:
@@ -196,9 +231,11 @@ class ConversationSendMessageView(APIView):
         llm_messages: list[dict[str, str]],
         langfuse_user_id: str | None,
         langfuse_metadata: dict,
+        thinking_enabled: bool = False,
         initial_event: dict | None = None,
     ):
         chunks: list[str] = []
+        thinking_tracker = ThinkingDurationTracker()
         if initial_event is not None:
             yield _stream_event(initial_event)
 
@@ -206,17 +243,31 @@ class ConversationSendMessageView(APIView):
             for delta in stream_llm_chat(
                 model=model,
                 messages=llm_messages,
+                thinking_enabled=thinking_enabled,
                 langfuse_session_id=str(conversation_id),
                 langfuse_user_id=langfuse_user_id,
                 langfuse_metadata=langfuse_metadata,
             ):
                 chunks.append(delta)
+                thinking_tracker.observe("".join(chunks))
                 yield _stream_event({"type": "delta", "delta": delta})
         except GeneratorExit:
-            self._save_assistant_reply(conversation_id, "".join(chunks), model)
+            thinking_tracker.finish()
+            self._save_assistant_reply(
+                conversation_id,
+                "".join(chunks),
+                model,
+                thinking_tracker.thinking_duration_ms,
+            )
             raise
         except (UnsupportedLlmModelError, RuntimeError) as exc:
-            self._save_assistant_reply(conversation_id, "".join(chunks), model)
+            thinking_tracker.finish()
+            self._save_assistant_reply(
+                conversation_id,
+                "".join(chunks),
+                model,
+                thinking_tracker.thinking_duration_ms,
+            )
             yield _stream_event(
                 {
                     "type": "error",
@@ -226,7 +277,13 @@ class ConversationSendMessageView(APIView):
             )
             return
 
-        saved_reply = self._save_assistant_reply(conversation_id, "".join(chunks), model)
+        thinking_tracker.finish()
+        saved_reply = self._save_assistant_reply(
+            conversation_id,
+            "".join(chunks),
+            model,
+            thinking_tracker.thinking_duration_ms,
+        )
         if saved_reply is None:
             yield _stream_event(
                 {
@@ -247,6 +304,7 @@ class ConversationSendMessageView(APIView):
         llm_messages: list[dict[str, str]],
         langfuse_user_id: str | None,
         langfuse_metadata: dict,
+        thinking_enabled: bool = False,
         initial_event: dict | None = None,
     ) -> StreamingHttpResponse:
         response = StreamingHttpResponse(
@@ -256,6 +314,7 @@ class ConversationSendMessageView(APIView):
                 llm_messages=llm_messages,
                 langfuse_user_id=langfuse_user_id,
                 langfuse_metadata=langfuse_metadata,
+                thinking_enabled=thinking_enabled,
                 initial_event=initial_event,
             ),
             content_type="application/x-ndjson",
@@ -293,6 +352,7 @@ class ConversationSendMessageView(APIView):
             or "You are a helpful AI assistant. Keep answers clear and concise unless asked otherwise."
         )
         wants_stream = serializer.validated_data.get("stream", False)
+        thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
 
         with transaction.atomic():
             # Flow 3: store the USER message first so later history and response include this request.
@@ -319,6 +379,7 @@ class ConversationSendMessageView(APIView):
             langfuse_metadata = {
                 "conversation_id": str(conversation.id),
                 "message_id": user_message.id,
+                "thinking_enabled": thinking_enabled,
             }
 
             if wants_stream:
@@ -333,6 +394,7 @@ class ConversationSendMessageView(APIView):
                     llm_messages=llm_messages,
                     langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
+                    thinking_enabled=thinking_enabled,
                     initial_event={
                         "type": "message",
                         "message": MessageSerializer(user_message).data,
@@ -345,6 +407,7 @@ class ConversationSendMessageView(APIView):
                 assistant_reply = request_llm_chat(
                     model=model,
                     messages=llm_messages,
+                    thinking_enabled=thinking_enabled,
                     langfuse_session_id=str(conversation.id),
                     langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
@@ -414,6 +477,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
             or "You are a helpful AI assistant. Keep answers clear and concise unless asked otherwise."
         )
         wants_stream = serializer.validated_data.get("stream", False)
+        thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
 
         with transaction.atomic():
             locked_conversation = (
@@ -476,6 +540,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                 "conversation_id": str(locked_conversation.id),
                 "message_id": user_message.id,
                 "regenerated_message_id": target_message.id,
+                "thinking_enabled": thinking_enabled,
             }
 
             target_message.delete()
@@ -493,6 +558,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                     llm_messages=llm_messages,
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
+                    thinking_enabled=thinking_enabled,
                     initial_event={
                         "type": "sync",
                         "conversation": serialize_conversation_detail(locked_conversation),
@@ -503,6 +569,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                 assistant_reply = request_llm_chat(
                     model=model,
                     messages=llm_messages,
+                    thinking_enabled=thinking_enabled,
                     langfuse_session_id=str(locked_conversation.id),
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
@@ -578,6 +645,7 @@ class ConversationForkMessageView(APIView):
                         conversation=forked_conversation,
                         role=message.role,
                         content=message.content,
+                        thinking_duration_ms=message.thinking_duration_ms,
                     )
                     for message in messages_to_copy
                 ]
@@ -617,6 +685,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
             or "You are a helpful AI assistant. Keep answers clear and concise unless asked otherwise."
         )
         wants_stream = serializer.validated_data.get("stream", False)
+        thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
         edited_content = serializer.validated_data["content"]
 
         with transaction.atomic():
@@ -654,6 +723,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
                 "conversation_id": str(locked_conversation.id),
                 "message_id": target_message.id,
                 "edited_message_id": target_message.id,
+                "thinking_enabled": thinking_enabled,
             }
 
             target_message.content = edited_content
@@ -681,6 +751,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
                     llm_messages=llm_messages,
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
+                    thinking_enabled=thinking_enabled,
                     initial_event={
                         "type": "sync",
                         "conversation": serialize_conversation_detail(locked_conversation),
@@ -691,6 +762,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
                 assistant_reply = request_llm_chat(
                     model=model,
                     messages=llm_messages,
+                    thinking_enabled=thinking_enabled,
                     langfuse_session_id=str(locked_conversation.id),
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,

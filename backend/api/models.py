@@ -50,6 +50,7 @@ class Message(models.Model):
     )
     role = models.CharField(max_length=20, choices=Role.choices)
     content = models.TextField()
+    thinking_duration_ms = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

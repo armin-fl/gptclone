@@ -6,6 +6,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
+import { formatThinkingDuration, splitThinkingBlocks } from "@/lib/thinking";
 import { cn } from "@/lib/utils";
 
 function getTextContent(node: ReactNode): string {
@@ -122,9 +123,9 @@ const markdownComponents: Components = {
   },
 };
 
-export function ChatMessageRenderer({ content }: { content: string }) {
+function MarkdownContent({ content, className }: { content: string; className?: string }) {
   return (
-    <div dir="auto" className="chat-message">
+    <div dir="auto" className={cn("chat-message", className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
@@ -132,6 +133,80 @@ export function ChatMessageRenderer({ content }: { content: string }) {
       >
         {content}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+interface ChatMessageRendererProps {
+  content: string;
+  thinkingDurationMs?: number | null;
+  isStreaming?: boolean;
+  isDark?: boolean;
+}
+
+export function ChatMessageRenderer({
+  content,
+  thinkingDurationMs = null,
+  isStreaming = false,
+  isDark = false,
+}: ChatMessageRendererProps) {
+  const segments = splitThinkingBlocks(content);
+  const hasThinking = segments.some((segment) => segment.type === "thinking");
+
+  if (!hasThinking) {
+    return <MarkdownContent content={content} />;
+  }
+
+  return (
+    <div dir="auto" className="space-y-3">
+      {segments.map((segment, index) => {
+        if (segment.type === "answer") {
+          return <MarkdownContent key={`${segment.type}-${index}`} content={segment.content} />;
+        }
+
+        if (segment.complete && !segment.content.trim() && thinkingDurationMs === null) {
+          return null;
+        }
+
+        const isLiveThinking = isStreaming && !segment.complete;
+        return (
+          <details
+            key={`${segment.type}-${index}`}
+            className={cn(
+              "group rounded-lg border px-3 py-2",
+              isDark
+                ? "border-[#25564d] bg-[#10211f]/70 text-[#8bd8ca]"
+                : "border-[#acd9d1] bg-[#eefaf7] text-[#0f766e]",
+            )}
+          >
+            <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
+              <span
+                className={cn(
+                  "inline-flex min-h-6 items-center rounded-full px-2.5",
+                  isDark ? "bg-[#16352f] text-[#a7f3d0]" : "bg-[#d8f3ec] text-[#0f766e]",
+                )}
+              >
+                {isLiveThinking ? "Thinking..." : formatThinkingDuration(thinkingDurationMs)}
+              </span>
+              <span className={cn("text-xs", isDark ? "text-[#6fd1c2]" : "text-[#2d8f83]")}>
+                <span className="group-open:hidden">Show</span>
+                <span className="hidden group-open:inline">Hide</span>
+              </span>
+            </summary>
+            {segment.content.trim() ? (
+              <MarkdownContent
+                content={segment.content}
+                className={cn(
+                  "chat-message-thinking-body mt-2 border-t pt-2 text-sm leading-6",
+                  isDark
+                    ? "border-[#25564d] text-[#a7c7c1]"
+                    : "border-[#acd9d1] text-[#3c6f68]",
+                )}
+              />
+            ) : null}
+          </details>
+        );
+      })}
     </div>
   );
 }

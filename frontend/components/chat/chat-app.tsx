@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
   Bot,
+  Brain,
   Camera,
   Check,
   ChevronDown,
@@ -73,6 +74,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Textarea } from "@/components/ui/textarea";
+import { stripThinkingBlocks } from "@/lib/thinking";
 import { cn } from "@/lib/utils";
 
 const PHONE_STORAGE_KEY = "chat_phone_number";
@@ -103,6 +105,7 @@ interface ModelOption {
   label: string;
   description: string;
   enabled: boolean;
+  supportsThinkingToggle?: boolean;
 }
 
 const MODEL_OPTIONS: ModelOption[] = [
@@ -117,12 +120,14 @@ const MODEL_OPTIONS: ModelOption[] = [
     label: "Qwen3 14B",
     description: "Local Ollama model",
     enabled: true,
+    supportsThinkingToggle: true,
   },
   {
     id: "qwen3-32b-awq",
     label: "Qwen3 32B AWQ",
     description: "Local vLLM AWQ model",
     enabled: true,
+    supportsThinkingToggle: true,
   },
   {
     id: "qwq-32b-awq",
@@ -278,7 +283,8 @@ function groupConversations(conversations: Conversation[], query: string) {
 }
 
 function getMessagePreview(content: string): string {
-  return content.length > 120 ? `${content.slice(0, 120)}...` : content;
+  const previewContent = stripThinkingBlocks(content);
+  return previewContent.length > 120 ? `${previewContent.slice(0, 120)}...` : previewContent;
 }
 
 function toConversationSummary(conversation: ConversationDetail): Conversation {
@@ -414,6 +420,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const [draft, setDraft] = useState("");
   const [systemInstruction, setSystemInstruction] = useState(DEFAULT_SYSTEM_INSTRUCTION);
   const [selectedModel, setSelectedModel] = useState(MODEL_OPTIONS[0].id);
+  const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modelStatuses, setModelStatuses] = useState<Record<string, LlmModelStatus>>({});
   const [isRefreshingModelStatuses, setIsRefreshingModelStatuses] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
@@ -492,6 +499,10 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     [modelStatuses],
   );
   const activeModel = modelOptions.find((model) => model.id === selectedModel) ?? modelOptions[0];
+  const activeModelStatus = modelStatuses[selectedModel];
+  const activeModelSupportsThinkingToggle =
+    activeModelStatus?.supports_thinking_toggle ?? activeModel.supportsThinkingToggle ?? false;
+  const requestedThinkingEnabled = activeModelSupportsThinkingToggle && thinkingEnabled;
   const isActiveModelAvailable = activeModel.enabled;
   const canSubmitDraft = Boolean(draft.trim()) && isActiveModelAvailable;
   const profileDisplayName = getDisplayName(currentUser, phoneNumber);
@@ -1383,12 +1394,14 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
         id: pendingUserMessageId,
         role: "user",
         content: message,
+        thinking_duration_ms: null,
         created_at: createdAt,
       };
       const pendingAssistantMessage: ChatMessage = {
         id: pendingAssistantDraftId,
         role: "assistant",
         content: "",
+        thinking_duration_ms: null,
         created_at: createdAt,
       };
       pendingAssistantMessageId = pendingAssistantMessage.id;
@@ -1415,6 +1428,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             content: message,
             model: selectedModel,
             system_instruction: systemInstruction.trim() || undefined,
+            thinking_enabled: requestedThinkingEnabled,
           },
           (streamEvent) => {
             if (streamEvent.type === "message") {
@@ -1564,6 +1578,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       id: getNextPendingMessageId(),
       role: "assistant",
       content: "",
+      thinking_duration_ms: null,
       created_at: new Date().toISOString(),
     };
     const pendingAssistantMessageId = pendingAssistantMessage.id;
@@ -1596,6 +1611,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
           {
             model: selectedModel,
             system_instruction: systemInstruction.trim() || undefined,
+            thinking_enabled: requestedThinkingEnabled,
           },
           (streamEvent) => {
             didReceiveStreamEvent = true;
@@ -1781,6 +1797,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       id: getNextPendingMessageId(),
       role: "assistant",
       content: "",
+      thinking_duration_ms: null,
       created_at: new Date().toISOString(),
     };
     const pendingAssistantMessageId = pendingAssistantMessage.id;
@@ -1818,6 +1835,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             content,
             model: selectedModel,
             system_instruction: systemInstruction.trim() || undefined,
+            thinking_enabled: requestedThinkingEnabled,
           },
           (streamEvent) => {
             didReceiveStreamEvent = true;
@@ -3088,6 +3106,9 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                             return;
                           }
                           setSelectedModel(model.id);
+                          if (!(modelStatuses[model.id]?.supports_thinking_toggle ?? model.supportsThinkingToggle ?? false)) {
+                            setThinkingEnabled(false);
+                          }
                           setIsModelMenuOpen(false);
                         }}
                         className={cn(
@@ -3405,7 +3426,12 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                               >
                                 <div className="chat-message-content" dir="auto">
                                 {message.content ? (
-                                  <ChatMessageRenderer content={message.content} />
+                                  <ChatMessageRenderer
+                                    content={message.content}
+                                    thinkingDurationMs={message.thinking_duration_ms}
+                                    isStreaming={message.role === "assistant" && message.id < 0}
+                                    isDark={isDark}
+                                  />
                                 ) : null}
                                 {message.role === "assistant" && message.id < 0 && !message.content ? (
                                   <span
@@ -3468,6 +3494,32 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                       aria-label="Attach file"
                     >
                       <Plus className="h-5 w-5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!activeModelSupportsThinkingToggle || isSending}
+                      aria-pressed={requestedThinkingEnabled}
+                      title={
+                        activeModelSupportsThinkingToggle
+                          ? "Toggle thinking"
+                          : `${activeModel.label} does not support thinking control`
+                      }
+                      onClick={() => setThinkingEnabled((value) => !value)}
+                      className={cn(
+                        "flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium transition disabled:cursor-not-allowed",
+                        requestedThinkingEnabled
+                          ? "bg-[#0f766e] text-white hover:bg-[#128a80]"
+                          : activeModelSupportsThinkingToggle
+                            ? isDark
+                              ? "text-[#d7d7d7] hover:bg-[#3f3f3f]"
+                              : "text-[#2f2f2f] hover:bg-[#f2f2f2]"
+                            : isDark
+                              ? "text-[#777777]"
+                              : "text-[#a0a0a0]",
+                      )}
+                    >
+                      <Brain className="h-4 w-4" />
+                      <span className="hidden sm:inline">Thinking</span>
                     </button>
                     <Textarea
                       ref={draftTextareaRef}

@@ -4,6 +4,7 @@ export interface ChatMessage {
   id: number;
   role: MessageRole;
   content: string;
+  thinking_duration_ms: number | null;
   created_at: string;
 }
 
@@ -35,6 +36,7 @@ export interface LlmModelStatus {
   id: string;
   label: string;
   provider: string;
+  supports_thinking_toggle: boolean;
   available: boolean;
   reason?: string;
 }

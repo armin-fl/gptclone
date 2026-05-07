@@ -116,6 +116,11 @@ body {
   width: 100%;
 }
 
+.chat-message-thinking-body {
+  font-size: 0.9em;
+  line-height: 1.7;
+}
+
 .chat-message :where(p, li, blockquote, h1, h2, h3, h4, h5, h6, td, th) {
   unicode-bidi: plaintext;
   text-align: start;

@@ -62,7 +62,7 @@ template, the safetensors index, and safetensors shards. The nested
 
 The Qwen3 32B AWQ and QwQ 32B AWQ vLLM models are loaded from
 `models/Vllm/Qwen3-32B-AWQ` and `models/Vllm/QwQ-32B-AWQ`.
-Their vLLM containers use a VRAM-saving profile: `--max-model-len 16384`,
+Their vLLM containers use the model context window: `--max-model-len 40960`,
 `--kv-cache-dtype fp8`, `--max-num-seqs 1`, `--enforce-eager`, and
 `--gpu-memory-utilization 0.82`. CPU model offload is explicitly disabled with
 `--cpu-offload-gb 0` and `--offload-group-size 0`; vLLM still uses CPU for
@@ -144,8 +144,8 @@ docker compose up -d --force-recreate vllm-new-model
 
 You can choose any enabled backend model from the chat UI model selector.
 Stopped model containers appear disabled in the selector.
-Backend chat completions are capped by `LLM_MAX_COMPLETION_TOKENS`, defaulting
-to `1024`, to keep output length and memory use predictable.
+Backend chat completions request the maximum remaining context for each model,
+capped by `LLM_MAX_COMPLETION_TOKENS`, which defaults to `131072`.
 
 Start one 32B AWQ model at a time:
 

@@ -18,10 +18,12 @@ from .pagination import (
     message_before_filter,
 )
 from .serializers import ConversationDetailSerializer, ConversationListSerializer, MessageSerializer
+from .services import strip_thinking_blocks
 
 
 def build_message_preview(content: str) -> str:
-    return f"{content[:120]}..." if len(content) > 120 else content
+    preview_content = strip_thinking_blocks(content)
+    return f"{preview_content[:120]}..." if len(preview_content) > 120 else preview_content
 
 
 def sync_conversation_summary(conversation: Conversation) -> Conversation:

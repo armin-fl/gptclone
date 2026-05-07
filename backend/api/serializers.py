@@ -6,7 +6,7 @@ from .models import Conversation, Message
 class MessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Message
-        fields = ("id", "role", "content", "created_at")
+        fields = ("id", "role", "content", "thinking_duration_ms", "created_at")
 
 
 class ConversationListSerializer(serializers.ModelSerializer):
@@ -67,6 +67,7 @@ class SendMessageSerializer(serializers.Serializer):
     content = serializers.CharField()
     model = serializers.CharField(max_length=100, required=False, allow_blank=True)
     system_instruction = serializers.CharField(required=False, allow_blank=True)
+    thinking_enabled = serializers.BooleanField(required=False, default=False)
     stream = serializers.BooleanField(required=False, default=False)
 
     def validate_content(self, value: str) -> str:
@@ -79,6 +80,7 @@ class SendMessageSerializer(serializers.Serializer):
 class RegenerateMessageSerializer(serializers.Serializer):
     model = serializers.CharField(max_length=100, required=False, allow_blank=True)
     system_instruction = serializers.CharField(required=False, allow_blank=True)
+    thinking_enabled = serializers.BooleanField(required=False, default=False)
     stream = serializers.BooleanField(required=False, default=False)
 
 

@@ -310,6 +310,7 @@ export async function streamMessage(
     content: string;
     model?: string;
     system_instruction?: string;
+    thinking_enabled?: boolean;
   },
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,
@@ -328,6 +329,7 @@ export async function streamRegenerateMessage(
   payload: {
     model?: string;
     system_instruction?: string;
+    thinking_enabled?: boolean;
   },
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,
@@ -347,6 +349,7 @@ export async function streamEditMessage(
     content: string;
     model?: string;
     system_instruction?: string;
+    thinking_enabled?: boolean;
   },
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,

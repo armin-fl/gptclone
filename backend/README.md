@@ -50,18 +50,24 @@ VLLM_MODELS = {
     "qwen3-32b-awq": "http://127.0.0.1:8002/v1",
     "qwq-32b-awq": "http://127.0.0.1:8003/v1",
 }
+VLLM_MODEL_CONTEXT_TOKENS = {
+    "gpt-oss-20b": 131072,
+    "qwen3-32b-awq": 40960,
+    "qwq-32b-awq": 40960,
+}
 VLLM_TIMEOUT_SECONDS = 120
 OLLAMA_MODEL = "qwen3:14b"
 OLLAMA_API_KEY = "ollama"
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
+OLLAMA_CONTEXT_LENGTH = 40960
 OLLAMA_TIMEOUT_SECONDS = 300
 LLM_MODEL = "gpt-oss-20b"
-LLM_MAX_COMPLETION_TOKENS = 1024
+LLM_MAX_COMPLETION_TOKENS = 131072
 LLM_MODELS = {
-    "gpt-oss-20b": {"provider": "vllm", "base_url": "http://127.0.0.1:8001/v1"},
-    "qwen3-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8002/v1"},
-    "qwq-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8003/v1"},
-    "qwen3:14b": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1"},
+    "gpt-oss-20b": {"provider": "vllm", "base_url": "http://127.0.0.1:8001/v1", "max_context_tokens": 131072},
+    "qwen3-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8002/v1", "max_context_tokens": 40960},
+    "qwq-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8003/v1", "max_context_tokens": 40960},
+    "qwen3:14b": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1", "max_context_tokens": 40960},
 }
 LANGFUSE_BASE_URL = "http://127.0.0.1:3001"
 LANGFUSE_PUBLIC_KEY = "pk-lf-dev-project-key"

@@ -28,9 +28,11 @@ from .services import (
     request_llm_chat,
     request_ollama_chat,
     request_vllm_chat,
+    strip_thinking_blocks,
     stream_ollama_chat,
     stream_vllm_chat,
 )
+from .serializers import SendMessageSerializer
 
 
 class VllmServiceTests(SimpleTestCase):
@@ -48,6 +50,33 @@ class VllmServiceTests(SimpleTestCase):
         self.assertIn("Use the following full chat history as context.", history)
         self.assertIn("USER: Hello", history)
         self.assertIn("ASSISTANT: Hi there", history)
+
+    def test_build_history_as_system_message_strips_thinking_blocks(self):
+        history = build_history_as_system_message(
+            [
+                SimpleNamespace(role="assistant", content="<think>private chain</think>\n\nVisible answer"),
+                SimpleNamespace(role="assistant", content="<think>unfinished"),
+            ]
+        )
+
+        self.assertIn("ASSISTANT: Visible answer", history)
+        self.assertNotIn("private chain", history)
+        self.assertNotIn("unfinished", history)
+
+    def test_strip_thinking_blocks_removes_complete_and_incomplete_blocks(self):
+        self.assertEqual(
+            strip_thinking_blocks("Intro\n<think>hidden</think>\nFinal"),
+            "Intro\n\nFinal",
+        )
+        self.assertEqual(strip_thinking_blocks("<think>still thinking"), "")
+
+    def test_send_message_serializer_accepts_thinking_enabled(self):
+        serializer = SendMessageSerializer(
+            data={"content": "Hello", "thinking_enabled": True, "stream": True}
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertTrue(serializer.validated_data["thinking_enabled"])
 
     def test_get_available_vllm_models_returns_hardcoded_models(self):
         self.assertEqual(
@@ -118,6 +147,7 @@ class VllmServiceTests(SimpleTestCase):
         self.assertEqual(status["id"], "gpt-oss-20b")
         self.assertTrue(status["available"])
         self.assertEqual(status["provider"], "vllm")
+        self.assertFalse(status["supports_thinking_toggle"])
         mock_get.assert_called_once_with(
             "http://127.0.0.1:8001/v1/models",
             headers={"Authorization": f"Bearer {settings.VLLM_API_KEY}"},
@@ -153,14 +183,17 @@ class VllmServiceTests(SimpleTestCase):
         )
 
     @patch("api.services.propagate_attributes")
+    @patch("api.services._tokenize_vllm_messages")
     @patch("api.services._build_vllm_client")
     def test_request_vllm_chat_routes_gpt_oss_20b_to_its_vllm_server(
         self,
         mock_build_client,
+        mock_tokenize_vllm_messages,
         mock_propagate_attributes,
     ):
         mock_client = mock_build_client.return_value
         mock_client.chat.completions.create.return_value = _FakeCompletion(" Hello from vLLM ")
+        mock_tokenize_vllm_messages.return_value = (9, 131072)
         mock_propagate_attributes.return_value = nullcontext()
 
         content = request_vllm_chat(
@@ -188,7 +221,7 @@ class VllmServiceTests(SimpleTestCase):
             model="gpt-oss-20b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
-            max_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
+            max_tokens=131063,
         )
 
     @patch("api.services.request_ollama_chat")
@@ -207,6 +240,7 @@ class VllmServiceTests(SimpleTestCase):
         mock_request_ollama_chat.assert_called_once_with(
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
+            thinking_enabled=False,
             langfuse_session_id="conversation-1",
             langfuse_user_id="user-1",
             langfuse_metadata={"message_id": 10},
@@ -248,18 +282,77 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
-            max_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
+            max_tokens=40943,
+            reasoning_effort="none",
         )
 
     @patch("api.services.propagate_attributes")
+    @patch("api.services._tokenize_vllm_messages")
     @patch("api.services._build_vllm_client")
-    def test_request_vllm_chat_rejects_empty_assistant_message(
+    def test_request_vllm_chat_passes_qwen_thinking_toggle(
+        self,
+        mock_build_client,
+        mock_tokenize_vllm_messages,
+        mock_propagate_attributes,
+    ):
+        mock_client = mock_build_client.return_value
+        mock_client.chat.completions.create.return_value = _FakeCompletion(" Hello ")
+        mock_tokenize_vllm_messages.return_value = (10, 40960)
+        mock_propagate_attributes.return_value = nullcontext()
+
+        content = request_vllm_chat(
+            model="qwen3-32b-awq",
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking_enabled=True,
+        )
+
+        self.assertEqual(content, "Hello")
+        mock_client.chat.completions.create.assert_called_once_with(
+            model="qwen3-32b-awq",
+            messages=[{"role": "user", "content": "Hello"}],
+            stream=False,
+            max_tokens=40950,
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+        )
+
+    @patch("api.services.propagate_attributes")
+    @patch("api.services._build_ollama_client")
+    def test_request_ollama_chat_passes_thinking_effort_when_enabled(
         self,
         mock_build_client,
         mock_propagate_attributes,
     ):
         mock_client = mock_build_client.return_value
+        mock_client.chat.completions.create.return_value = _FakeCompletion(" Hello ")
+        mock_propagate_attributes.return_value = nullcontext()
+
+        content = request_ollama_chat(
+            model="qwen3:14b",
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking_enabled=True,
+        )
+
+        self.assertEqual(content, "Hello")
+        mock_client.chat.completions.create.assert_called_once_with(
+            model="qwen3:14b",
+            messages=[{"role": "user", "content": "Hello"}],
+            stream=False,
+            max_tokens=40943,
+            reasoning_effort="medium",
+        )
+
+    @patch("api.services.propagate_attributes")
+    @patch("api.services._tokenize_vllm_messages")
+    @patch("api.services._build_vllm_client")
+    def test_request_vllm_chat_rejects_empty_assistant_message(
+        self,
+        mock_build_client,
+        mock_tokenize_vllm_messages,
+        mock_propagate_attributes,
+    ):
+        mock_client = mock_build_client.return_value
         mock_client.chat.completions.create.return_value = _FakeCompletion(" ")
+        mock_tokenize_vllm_messages.return_value = (9, 131072)
         mock_propagate_attributes.return_value = nullcontext()
 
         with self.assertRaisesMessage(
@@ -281,10 +374,12 @@ class VllmServiceTests(SimpleTestCase):
         )
 
     @patch("api.services.propagate_attributes")
+    @patch("api.services._tokenize_vllm_messages")
     @patch("api.services._build_vllm_client")
     def test_stream_vllm_chat_yields_assistant_deltas(
         self,
         mock_build_client,
+        mock_tokenize_vllm_messages,
         mock_propagate_attributes,
     ):
         mock_client = mock_build_client.return_value
@@ -293,6 +388,7 @@ class VllmServiceTests(SimpleTestCase):
             _FakeStreamChunk(None),
             _FakeStreamChunk(" from vLLM"),
         ]
+        mock_tokenize_vllm_messages.return_value = (9, 131072)
         mock_propagate_attributes.return_value = nullcontext()
 
         chunks = list(
@@ -307,7 +403,8 @@ class VllmServiceTests(SimpleTestCase):
             model="gpt-oss-20b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=True,
-            max_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
+            max_tokens=131063,
+            stream_options={"include_usage": True},
         )
 
     @patch("api.services.propagate_attributes")
@@ -337,24 +434,67 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=True,
-            max_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
+            max_tokens=40943,
+            reasoning_effort="none",
+            stream_options={"include_usage": True},
+        )
+
+    @patch("api.services.propagate_attributes")
+    @patch("api.services._tokenize_vllm_messages")
+    @patch("api.services._build_vllm_client")
+    def test_stream_vllm_chat_normalizes_reasoning_deltas(
+        self,
+        mock_build_client,
+        mock_tokenize_vllm_messages,
+        mock_propagate_attributes,
+    ):
+        mock_client = mock_build_client.return_value
+        mock_client.chat.completions.create.return_value = [
+            _FakeStreamChunk(reasoning_content="Plan"),
+            _FakeStreamChunk("Answer"),
+        ]
+        mock_tokenize_vllm_messages.return_value = (9, 40960)
+        mock_propagate_attributes.return_value = nullcontext()
+
+        chunks = list(
+            stream_vllm_chat(
+                model="qwen3-32b-awq",
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking_enabled=False,
+            )
+        )
+
+        self.assertEqual(chunks, ["<think>", "Plan", "</think>\n\n", "Answer"])
+        mock_client.chat.completions.create.assert_called_once_with(
+            model="qwen3-32b-awq",
+            messages=[{"role": "user", "content": "Hello"}],
+            stream=True,
+            max_tokens=40951,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            stream_options={"include_usage": True},
         )
 
 
 class _FakeCompletion:
-    def __init__(self, content):
+    def __init__(self, content, reasoning_content=None):
+        message = SimpleNamespace(content=content)
+        if reasoning_content is not None:
+            message.reasoning_content = reasoning_content
         self.choices = [
             SimpleNamespace(
-                message=SimpleNamespace(content=content),
+                message=message,
             )
         ]
 
 
 class _FakeStreamChunk:
-    def __init__(self, content):
+    def __init__(self, content=None, reasoning_content=None):
+        delta = SimpleNamespace(content=content)
+        if reasoning_content is not None:
+            delta.reasoning_content = reasoning_content
         self.choices = [
             SimpleNamespace(
-                delta=SimpleNamespace(content=content),
+                delta=delta,
             )
         ]
 
@@ -591,6 +731,45 @@ class ConversationAuthorizationTests(TestCase):
                 content="Hello stream",
             ).exists()
         )
+
+    @patch("api.views.time.monotonic")
+    @patch("api.views.stream_llm_chat")
+    def test_streaming_message_saves_thinking_duration_and_strips_preview(
+        self,
+        mock_stream_llm_chat,
+        mock_monotonic,
+    ):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user)
+        mock_stream_llm_chat.return_value = [
+            "<think>",
+            "private plan",
+            "</think>\n\n",
+            "Final answer",
+        ]
+        mock_monotonic.side_effect = [10.0, 18.4]
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/",
+            {"content": "Hi", "stream": True, "thinking_enabled": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = b"".join(response.streaming_content).decode("utf-8")
+        events = [json.loads(line) for line in body.splitlines()]
+
+        done = events[-1]
+        self.assertEqual(done["message"]["content"], "<think>private plan</think>\n\nFinal answer")
+        self.assertEqual(done["message"]["thinking_duration_ms"], 8400)
+        self.assertEqual(done["conversation"]["last_message_preview"], "Final answer")
+        stored_message = Message.objects.get(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+        )
+        self.assertEqual(stored_message.thinking_duration_ms, 8400)
+        mock_stream_llm_chat.assert_called_once()
+        self.assertTrue(mock_stream_llm_chat.call_args.kwargs["thinking_enabled"])
 
     @patch("api.views.stream_llm_chat")
     def test_regenerate_latest_assistant_replaces_only_that_response(self, mock_stream_llm_chat):
