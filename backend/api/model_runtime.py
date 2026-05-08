@@ -63,6 +63,10 @@ def vllm_auto_switch_enabled() -> bool:
     return _bool_setting("VLLM_AUTO_SWITCH_ENABLED", False)
 
 
+def vllm_sleep_mode_enabled() -> bool:
+    return _bool_setting("VLLM_SLEEP_MODE_ENABLED", False)
+
+
 def get_vllm_container_config(model: str) -> VllmContainerConfig | None:
     raw_config = getattr(settings, "VLLM_MODEL_CONTAINERS", {}).get(model)
     if not raw_config:
@@ -288,6 +292,114 @@ def _wait_for_vllm_ready(model: str) -> None:
     )
 
 
+def _vllm_server_root(model: str) -> str:
+    base_url = str(settings.VLLM_MODELS[model]).rstrip("/")
+    if base_url.endswith("/v1"):
+        return base_url[:-3]
+    return base_url
+
+
+def _vllm_runtime_headers() -> dict[str, str]:
+    api_key = str(getattr(settings, "VLLM_API_KEY", ""))
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def _vllm_runtime_timeout() -> float:
+    return float(getattr(settings, "VLLM_SLEEP_ENDPOINT_TIMEOUT_SECONDS", 900))
+
+
+def _parse_sleep_state(payload) -> bool | None:
+    if isinstance(payload, bool):
+        return payload
+    if isinstance(payload, str):
+        clean = payload.strip().lower()
+        if clean in {"true", "1", "yes"}:
+            return True
+        if clean in {"false", "0", "no"}:
+            return False
+    if isinstance(payload, dict):
+        for key in ("is_sleeping", "sleeping", "isSleeping"):
+            if key in payload:
+                return _parse_sleep_state(payload[key])
+    return None
+
+
+def is_vllm_model_sleeping(model: str) -> bool | None:
+    try:
+        response = requests.get(
+            f"{_vllm_server_root(model)}/is_sleeping",
+            headers=_vllm_runtime_headers(),
+            timeout=settings.LLM_MODEL_HEALTH_TIMEOUT_SECONDS,
+        )
+        if getattr(response, "status_code", None) == 404:
+            return None
+        response.raise_for_status()
+        try:
+            return _parse_sleep_state(response.json())
+        except ValueError:
+            return _parse_sleep_state(response.text)
+    except (KeyError, RequestException):
+        return None
+
+
+def _post_vllm_runtime_endpoint(model: str, endpoint: str, *, params: dict | None = None) -> None:
+    try:
+        response = requests.post(
+            f"{_vllm_server_root(model)}/{endpoint.lstrip('/')}",
+            headers=_vllm_runtime_headers(),
+            params=params or {},
+            timeout=_vllm_runtime_timeout(),
+        )
+        response.raise_for_status()
+    except RequestException as exc:
+        raise VllmRuntimeError(
+            f"vLLM sleep-mode endpoint '{endpoint}' failed for model '{model}': {exc}"
+        ) from exc
+
+
+def _sleep_vllm_model(model: str) -> None:
+    if not vllm_sleep_mode_enabled():
+        config = get_vllm_container_config(model)
+        if config is not None:
+            _stop_container(config.container_name)
+        return
+
+    config = get_vllm_container_config(model)
+    if config is None or not _container_running(config.container_name):
+        return
+
+    sleep_state = is_vllm_model_sleeping(model)
+    if sleep_state is True:
+        return
+    if sleep_state is None:
+        raise VllmRuntimeError(
+            f"vLLM sleep mode is enabled, but '{model}' does not expose /is_sleeping. "
+            "Recreate the container after adding VLLM_SERVER_DEV_MODE=1 and --enable-sleep-mode."
+        )
+
+    _post_vllm_runtime_endpoint(
+        model,
+        "sleep",
+        params={"level": int(getattr(settings, "VLLM_SLEEP_LEVEL", 1))},
+    )
+
+
+def _wake_vllm_model(model: str) -> None:
+    if not vllm_sleep_mode_enabled():
+        return
+
+    sleep_state = is_vllm_model_sleeping(model)
+    if sleep_state is False:
+        return
+    if sleep_state is None:
+        raise VllmRuntimeError(
+            f"vLLM sleep mode is enabled, but '{model}' does not expose /is_sleeping. "
+            "Recreate the container after adding VLLM_SERVER_DEV_MODE=1 and --enable-sleep-mode."
+        )
+
+    _post_vllm_runtime_endpoint(model, "wake_up")
+
+
 def _clear_model_status_cache() -> None:
     for model in _managed_vllm_models():
         cache.delete(f"llm:model-status:{model}")
@@ -311,10 +423,12 @@ def _switch_vllm_model(model: str) -> None:
         if other_model == model:
             continue
         other_config = get_vllm_container_config(other_model)
-        if other_config is not None:
-            _stop_container(other_config.container_name)
+        if other_config is None or not _container_running(other_config.container_name):
+            continue
+        _sleep_vllm_model(other_model)
 
-    if not _container_running(requested_config.container_name):
+    was_running = _container_running(requested_config.container_name)
+    if not was_running:
         _start_container(requested_config)
 
     if not _container_running(requested_config.container_name):
@@ -322,7 +436,10 @@ def _switch_vllm_model(model: str) -> None:
             f"vLLM container '{requested_config.container_name}' did not start."
         )
 
+    if was_running:
+        _wake_vllm_model(model)
     _wait_for_vllm_ready(model)
+
     cache.set(ACTIVE_VLLM_MODEL_KEY, model, timeout=None)
     _clear_model_status_cache()
 
@@ -339,7 +456,13 @@ def _register_vllm_inference(model: str) -> None:
         if requested_config is None:
             return
 
-        if active_model != model or not _container_running(requested_config.container_name):
+        is_running = _container_running(requested_config.container_name)
+        is_sleeping = (
+            is_running
+            and vllm_sleep_mode_enabled()
+            and is_vllm_model_sleeping(model) is True
+        )
+        if active_model != model or not is_running or is_sleeping:
             _switch_vllm_model(model)
 
         _increment_inflight(model)

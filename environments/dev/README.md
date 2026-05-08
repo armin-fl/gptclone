@@ -51,13 +51,15 @@ Model containers do not hard-depend on the `langfuse-web` service, so the
 override file can still be rendered or used for model-only commands.
 
 The Django backend routes by the request `model` field. For vLLM models it also
-owns a single GPU slot: before a request, Django stops every other managed vLLM
-container, starts the requested container if needed, waits for `/models`, and
-then sends the completion. After the response finishes, the current container is
-left running so other requests for the same model can reuse the warm server and
-run concurrently. When a later request selects a different vLLM model, Django
-waits for current in-flight requests to finish before stopping the previous
-container and starting the new one.
+owns a single GPU slot. Before a request, Django waits for other in-flight vLLM
+requests to finish, puts any other running vLLM servers into sleep mode, starts
+the requested container if needed, wakes the requested server, waits for
+`/models`, and then sends the completion. Same-model requests can run
+concurrently on the already-awake server. A model's first use is still a normal
+cold start; after each model has been selected once, all managed vLLM containers
+can stay running with one awake and the inactive models asleep. Later switches
+between already-started sleeping vLLM servers avoid full container restart and
+use vLLM's `/sleep` and `/wake_up` endpoints.
 
 The current GPT-OSS model is loaded from `models/Vllm/OpenAI`. That directory is the
 Hugging Face/vLLM-ready model root with `config.json`, tokenizer files, chat
@@ -66,18 +68,29 @@ template, the safetensors index, and safetensors shards. The nested
 
 The Qwen3 32B AWQ and QwQ 32B AWQ vLLM models are loaded from
 `models/Vllm/Qwen3-32B-AWQ` and `models/Vllm/QwQ-32B-AWQ`.
-Their vLLM containers use the model context window: `--max-model-len 40960`,
+Their vLLM containers use the model context window: `--max-model-len 32768`,
 `--kv-cache-dtype fp8`, `--max-num-seqs ${VLLM_32B_MAX_NUM_SEQS:-2}`, `--enforce-eager`, and
-`--gpu-memory-utilization 0.82`. CPU model offload is explicitly disabled with
+`--gpu-memory-utilization ${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}`. CPU model offload is explicitly disabled with
 `--cpu-offload-gb 0` and `--offload-group-size 0`; vLLM still uses CPU for
 normal orchestration, tokenization, networking, and process scheduling. vLLM
 services are profile-gated so `docker compose up -d` does not load every model
 into VRAM.
+The GPT-OSS container uses
+`--max-model-len 32768` and
+`--gpu-memory-utilization ${VLLM_GPT_OSS_20B_GPU_MEMORY_UTILIZATION:-0.60}`.
+These defaults leave headroom for two sleeping vLLM servers' residual CUDA
+memory. Raising them can improve KV-cache capacity, but can also make model
+switches fail with CUDA OOM while other servers are asleep.
 Set `VLLM_32B_MAX_NUM_SEQS` before starting a 32B service to tune same-model
-parallelism. The default is `2`; use `1` if the GPU runs out of memory, or a
-higher value if the model and context length fit comfortably.
-Existing running containers must be recreated before a changed `max-num-seqs`
-value takes effect.
+parallelism. The default is `2`; two full 32k prompts may still exceed KV-cache
+capacity, but smaller concurrent prompts should work. Use `1` if the GPU runs
+out of memory, or a higher value if the model and context length fit
+comfortably.
+Existing running containers must be recreated before changed `max-num-seqs` or
+`gpu-memory-utilization` values take effect.
+vLLM sleep mode is enabled with `VLLM_SERVER_DEV_MODE=1` and
+`--enable-sleep-mode`. Because those development endpoints expose operational
+controls, vLLM ports are bound to `127.0.0.1` only.
 
 The current Qwen model is loaded from `models/Ollama/Qwen3-14b`. That directory
 is mounted as Ollama's `/root/.ollama/models` store, so the existing
@@ -165,7 +178,7 @@ docker compose up -d --force-recreate vllm-new-model
 You can choose any enabled backend model from the chat UI model selector.
 Managed stopped vLLM containers remain selectable and start automatically.
 Backend chat completions request the maximum remaining context for each model,
-capped by `LLM_MAX_COMPLETION_TOKENS`, which defaults to `131072`.
+capped by `LLM_MAX_COMPLETION_TOKENS`, which defaults to `32768`.
 
 Manual one-at-a-time switching still works:
 

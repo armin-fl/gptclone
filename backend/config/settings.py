@@ -145,9 +145,9 @@ VLLM_MODELS = {
     "qwq-32b-awq": "http://127.0.0.1:8003/v1",
 }
 VLLM_MODEL_CONTEXT_TOKENS = {
-    "gpt-oss-20b": int(os.environ.get("VLLM_GPT_OSS_20B_CONTEXT_TOKENS", "131072")),
-    "qwen3-32b-awq": int(os.environ.get("VLLM_QWEN3_32B_AWQ_CONTEXT_TOKENS", "40960")),
-    "qwq-32b-awq": int(os.environ.get("VLLM_QWQ_32B_AWQ_CONTEXT_TOKENS", "40960")),
+    "gpt-oss-20b": int(os.environ.get("VLLM_GPT_OSS_20B_CONTEXT_TOKENS", "32768")),
+    "qwen3-32b-awq": int(os.environ.get("VLLM_QWEN3_32B_AWQ_CONTEXT_TOKENS", "32768")),
+    "qwq-32b-awq": int(os.environ.get("VLLM_QWQ_32B_AWQ_CONTEXT_TOKENS", "32768")),
 }
 VLLM_TIMEOUT_SECONDS = 120
 VLLM_MODEL_CONTAINERS = {
@@ -168,6 +168,12 @@ VLLM_AUTO_SWITCH_ENABLED = env_bool(
     "VLLM_AUTO_SWITCH_ENABLED",
     "0" if IS_TEST_COMMAND else "1",
 )
+VLLM_SLEEP_MODE_ENABLED = env_bool(
+    "VLLM_SLEEP_MODE_ENABLED",
+    "0" if IS_TEST_COMMAND else "1",
+)
+VLLM_SLEEP_LEVEL = int(os.environ.get("VLLM_SLEEP_LEVEL", "1"))
+VLLM_SLEEP_ENDPOINT_TIMEOUT_SECONDS = float(os.environ.get("VLLM_SLEEP_ENDPOINT_TIMEOUT_SECONDS", "900"))
 VLLM_DOCKER_COMPOSE_DIR = os.environ.get(
     "VLLM_DOCKER_COMPOSE_DIR",
     os.path.join(PROJECT_DIR, "environments", "dev"),
@@ -188,14 +194,14 @@ LLM_MODEL_HEALTH_CACHE_SECONDS = int(os.environ.get("LLM_MODEL_HEALTH_CACHE_SECO
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:14b")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
-OLLAMA_CONTEXT_LENGTH = int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "40960"))
+OLLAMA_CONTEXT_LENGTH = int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "32768"))
 OLLAMA_MODELS = {
     OLLAMA_MODEL: OLLAMA_BASE_URL,
 }
 OLLAMA_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "300"))
 
 LLM_MODEL = os.environ.get("LLM_MODEL", VLLM_MODEL)
-LLM_MAX_COMPLETION_TOKENS = int(os.environ.get("LLM_MAX_COMPLETION_TOKENS", "131072"))
+LLM_MAX_COMPLETION_TOKENS = int(os.environ.get("LLM_MAX_COMPLETION_TOKENS", "32768"))
 LLM_MODELS = {
     **{
         model: {

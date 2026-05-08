@@ -9,7 +9,13 @@ from langfuse.openai import OpenAI as LangfuseOpenAI
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAIError
 from requests import RequestException
 
-from .model_runtime import is_managed_vllm_model, managed_vllm_model, vllm_auto_switch_enabled
+from .model_runtime import (
+    is_managed_vllm_model,
+    is_vllm_model_sleeping,
+    managed_vllm_model,
+    vllm_auto_switch_enabled,
+    vllm_sleep_mode_enabled,
+)
 
 
 class UnsupportedLlmModelError(RuntimeError):
@@ -134,8 +140,8 @@ def get_llm_model_status(model: str) -> dict:
             headers=headers,
             timeout=settings.LLM_MODEL_HEALTH_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
         server_reachable = True
+        response.raise_for_status()
 
         is_available = True
         reason = ""
@@ -150,9 +156,17 @@ def get_llm_model_status(model: str) -> dict:
         reason = str(exc)
 
     is_managed = provider == "vllm" and is_managed_vllm_model(model)
+    is_sleeping = (
+        is_managed
+        and vllm_sleep_mode_enabled()
+        and is_vllm_model_sleeping(model) is True
+    )
     if not is_available and not server_reachable and is_managed and vllm_auto_switch_enabled():
         is_available = True
         reason = "Model container is stopped. It will start automatically on first request."
+    elif is_sleeping and vllm_auto_switch_enabled():
+        is_available = True
+        reason = "Model server is sleeping. It will wake automatically on first request."
 
     status = {
         "id": model,
@@ -161,6 +175,7 @@ def get_llm_model_status(model: str) -> dict:
         "supports_thinking_toggle": model_supports_thinking_toggle(model),
         "managed": is_managed,
         "running": server_reachable,
+        "sleeping": is_sleeping,
         "available": is_available,
         "reason": reason,
     }

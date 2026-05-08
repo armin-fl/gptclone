@@ -51,9 +51,9 @@ VLLM_MODELS = {
     "qwq-32b-awq": "http://127.0.0.1:8003/v1",
 }
 VLLM_MODEL_CONTEXT_TOKENS = {
-    "gpt-oss-20b": 131072,
-    "qwen3-32b-awq": 40960,
-    "qwq-32b-awq": 40960,
+    "gpt-oss-20b": 32768,
+    "qwen3-32b-awq": 32768,
+    "qwq-32b-awq": 32768,
 }
 VLLM_TIMEOUT_SECONDS = 120
 VLLM_AUTO_SWITCH_ENABLED = True
@@ -65,15 +65,15 @@ VLLM_MODEL_CONTAINERS = {
 OLLAMA_MODEL = "qwen3:14b"
 OLLAMA_API_KEY = "ollama"
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
-OLLAMA_CONTEXT_LENGTH = 40960
+OLLAMA_CONTEXT_LENGTH = 32768
 OLLAMA_TIMEOUT_SECONDS = 300
 LLM_MODEL = "gpt-oss-20b"
-LLM_MAX_COMPLETION_TOKENS = 131072
+LLM_MAX_COMPLETION_TOKENS = 32768
 LLM_MODELS = {
-    "gpt-oss-20b": {"provider": "vllm", "base_url": "http://127.0.0.1:8001/v1", "max_context_tokens": 131072},
-    "qwen3-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8002/v1", "max_context_tokens": 40960},
-    "qwq-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8003/v1", "max_context_tokens": 40960},
-    "qwen3:14b": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1", "max_context_tokens": 40960},
+    "gpt-oss-20b": {"provider": "vllm", "base_url": "http://127.0.0.1:8001/v1", "max_context_tokens": 32768},
+    "qwen3-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8002/v1", "max_context_tokens": 32768},
+    "qwq-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8003/v1", "max_context_tokens": 32768},
+    "qwen3:14b": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1", "max_context_tokens": 32768},
 }
 LANGFUSE_BASE_URL = "http://127.0.0.1:3001"
 LANGFUSE_PUBLIC_KEY = "pk-lf-dev-project-key"
@@ -88,11 +88,13 @@ OTP_MAX_ATTEMPTS = 5
 The Langfuse SDK reads those values from environment variables if set, otherwise
 the dev defaults above match `environments/dev/docker-compose.yml`.
 With `VLLM_AUTO_SWITCH_ENABLED`, each vLLM request owns one GPU slot: Django
-stops other managed vLLM containers, starts the requested one, waits until the
-OpenAI-compatible `/models` endpoint is ready, then leaves that container warm
-for concurrent requests using the same model. A request for a different vLLM
-model waits for current in-flight requests to finish before stopping the active
-container and starting the new one.
+puts other managed vLLM servers to sleep, starts the requested one if needed,
+wakes it, waits until the OpenAI-compatible `/models` endpoint is ready, then
+leaves that server awake for concurrent requests using the same model. A request
+for a different vLLM model waits for current in-flight requests to finish before
+sleeping the active server and waking the new one. Once each vLLM model has
+been selected once, all three containers can remain running with one active and
+the others asleep.
 
 ### Migrations and superuser
 

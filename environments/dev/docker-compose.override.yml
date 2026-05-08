@@ -5,7 +5,7 @@ services:
   #   restart: unless-stopped
   #   environment:
   #     OLLAMA_HOST: 0.0.0.0:11434
-  #     OLLAMA_CONTEXT_LENGTH: 40960
+  #     OLLAMA_CONTEXT_LENGTH: 32768
   #     OLLAMA_MODELS: /root/.ollama/models
   #     OLLAMA_KEEP_ALIVE: 10m
   #   ports:
@@ -32,12 +32,12 @@ services:
     restart: unless-stopped
     ipc: host
     environment:
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      VLLM_SERVER_DEV_MODE: "1"
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
       OTEL_SERVICE_NAME: vllm-gpt-oss-20b
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     volumes:
       - ../../data/huggingface:/root/.cache/huggingface
       - ../../models/Vllm/OpenAI:/models/gpt-oss-20b:ro
@@ -48,6 +48,11 @@ services:
       - gpt-oss-20b
       - --dtype
       - auto
+      - --max-model-len
+      - "32768"
+      - --gpu-memory-utilization
+      - "${VLLM_GPT_OSS_20B_GPU_MEMORY_UTILIZATION:-0.60}"
+      - --enable-sleep-mode
       - --otlp-traces-endpoint
       - http://langfuse-web:3000/api/public/otel/v1/traces
     deploy:
@@ -65,12 +70,12 @@ services:
     restart: unless-stopped
     ipc: host
     environment:
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      VLLM_SERVER_DEV_MODE: "1"
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
       OTEL_SERVICE_NAME: vllm-qwen3-32b-awq
     ports:
-      - "8002:8000"
+      - "127.0.0.1:8002:8000"
     volumes:
       - ../../data/huggingface:/root/.cache/huggingface
       - ../../models/Vllm/Qwen3-32B-AWQ:/models/qwen3-32b-awq:ro
@@ -86,14 +91,15 @@ services:
       - --offload-group-size
       - "0"
       - --gpu-memory-utilization
-      - "0.82"
+      - "${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}"
       - --max-model-len
-      - "40960"
+      - "32768"
       - --kv-cache-dtype
       - fp8
       - --max-num-seqs
       - "${VLLM_32B_MAX_NUM_SEQS:-2}"
       - --enforce-eager
+      - --enable-sleep-mode
       - --otlp-traces-endpoint
       - http://langfuse-web:3000/api/public/otel/v1/traces
     deploy:
@@ -111,12 +117,12 @@ services:
     restart: unless-stopped
     ipc: host
     environment:
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      VLLM_SERVER_DEV_MODE: "1"
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
       OTEL_SERVICE_NAME: vllm-qwq-32b-awq
     ports:
-      - "8003:8000"
+      - "127.0.0.1:8003:8000"
     volumes:
       - ../../data/huggingface:/root/.cache/huggingface
       - ../../models/Vllm/QwQ-32B-AWQ:/models/qwq-32b-awq:ro
@@ -132,14 +138,15 @@ services:
       - --offload-group-size
       - "0"
       - --gpu-memory-utilization
-      - "0.82"
+      - "${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}"
       - --max-model-len
-      - "40960"
+      - "32768"
       - --kv-cache-dtype
       - fp8
       - --max-num-seqs
       - "${VLLM_32B_MAX_NUM_SEQS:-2}"
       - --enforce-eager
+      - --enable-sleep-mode
       - --otlp-traces-endpoint
       - http://langfuse-web:3000/api/public/otel/v1/traces
     deploy:

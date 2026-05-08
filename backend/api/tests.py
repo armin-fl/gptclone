@@ -18,6 +18,7 @@ from .model_runtime import (
     ACTIVE_VLLM_MODEL_KEY,
     _inflight_cache_key,
     _inflight_count,
+    _switch_vllm_model,
     managed_vllm_model,
 )
 from .services import (
@@ -86,6 +87,7 @@ class VllmServiceTests(SimpleTestCase):
 
     @override_settings(
         VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_SLEEP_MODE_ENABLED=False,
         VLLM_MODEL_CONTAINERS={
             "model-1": {
                 "service_name": "vllm-model-1",
@@ -114,6 +116,35 @@ class VllmServiceTests(SimpleTestCase):
 
     @override_settings(
         VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_SLEEP_MODE_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
+        },
+    )
+    @patch("api.model_runtime._switch_vllm_model")
+    @patch("api.model_runtime.is_vllm_model_sleeping")
+    @patch("api.model_runtime._container_running")
+    def test_managed_vllm_model_wakes_cached_active_sleeping_model(
+        self,
+        mock_container_running,
+        mock_is_vllm_model_sleeping,
+        mock_switch_vllm_model,
+    ):
+        cache.set(ACTIVE_VLLM_MODEL_KEY, "model-1", timeout=None)
+        mock_container_running.return_value = True
+        mock_is_vllm_model_sleeping.return_value = True
+
+        with managed_vllm_model("model-1"):
+            self.assertEqual(_inflight_count("model-1"), 1)
+
+        self.assertEqual(_inflight_count("model-1"), 0)
+        mock_switch_vllm_model.assert_called_once_with("model-1")
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
         VLLM_MODEL_CONTAINERS={
             "model-1": {
                 "service_name": "vllm-model-1",
@@ -131,18 +162,20 @@ class VllmServiceTests(SimpleTestCase):
         VLLM_INFLIGHT_DRAIN_TIMEOUT_SECONDS=5,
         VLLM_RUNTIME_POLL_SECONDS=0.01,
     )
+    @patch("api.model_runtime._wake_vllm_model")
     @patch("api.model_runtime._wait_for_vllm_ready")
     @patch("api.model_runtime._start_container")
-    @patch("api.model_runtime._stop_container")
+    @patch("api.model_runtime._sleep_vllm_model")
     @patch("api.model_runtime._container_running")
     @patch("api.model_runtime.time.sleep")
     def test_switch_waits_for_other_model_inflight_requests_to_finish(
         self,
         mock_sleep,
         mock_container_running,
-        mock_stop_container,
+        mock_sleep_vllm_model,
         mock_start_container,
         mock_wait_for_vllm_ready,
+        mock_wake_vllm_model,
     ):
         cache.set(ACTIVE_VLLM_MODEL_KEY, "model-1", timeout=None)
         cache.set(_inflight_cache_key("model-1"), 1, timeout=None)
@@ -155,9 +188,55 @@ class VllmServiceTests(SimpleTestCase):
 
         self.assertEqual(_inflight_count("model-2"), 0)
         mock_sleep.assert_called()
-        mock_stop_container.assert_called_once_with("vllm-model-1-dev")
+        mock_sleep_vllm_model.assert_called_once_with("model-1")
+        mock_wake_vllm_model.assert_called_once_with("model-2")
         mock_start_container.assert_not_called()
         mock_wait_for_vllm_ready.assert_called_once_with("model-2")
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_SLEEP_MODE_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
+            "model-2": {
+                "service_name": "vllm-model-2",
+                "container_name": "vllm-model-2-dev",
+            },
+            "model-3": {
+                "service_name": "vllm-model-3",
+                "container_name": "vllm-model-3-dev",
+            },
+        },
+        VLLM_MODELS={
+            "model-1": "http://127.0.0.1:8101/v1",
+            "model-2": "http://127.0.0.1:8102/v1",
+            "model-3": "http://127.0.0.1:8103/v1",
+        },
+    )
+    @patch("api.model_runtime._wake_vllm_model")
+    @patch("api.model_runtime._wait_for_vllm_ready")
+    @patch("api.model_runtime._sleep_vllm_model")
+    @patch("api.model_runtime._container_running")
+    def test_switch_sleeps_all_running_standby_models(
+        self,
+        mock_container_running,
+        mock_sleep_vllm_model,
+        mock_wait_for_vllm_ready,
+        mock_wake_vllm_model,
+    ):
+        cache.set(ACTIVE_VLLM_MODEL_KEY, "model-1", timeout=None)
+        mock_container_running.return_value = True
+
+        _switch_vllm_model("model-3")
+
+        self.assertEqual(mock_sleep_vllm_model.call_count, 2)
+        mock_sleep_vllm_model.assert_any_call("model-1")
+        mock_sleep_vllm_model.assert_any_call("model-2")
+        mock_wake_vllm_model.assert_called_once_with("model-3")
+        mock_wait_for_vllm_ready.assert_called_once_with("model-3")
 
     def test_get_available_vllm_models_returns_hardcoded_models(self):
         self.assertEqual(
@@ -235,6 +314,27 @@ class VllmServiceTests(SimpleTestCase):
             timeout=settings.LLM_MODEL_HEALTH_TIMEOUT_SECONDS,
         )
 
+    @override_settings(VLLM_AUTO_SWITCH_ENABLED=True, VLLM_SLEEP_MODE_ENABLED=True)
+    @patch("api.services.is_vllm_model_sleeping")
+    @patch("api.services.requests.get")
+    def test_get_llm_model_status_marks_sleeping_model_available(
+        self,
+        mock_get,
+        mock_is_vllm_model_sleeping,
+    ):
+        mock_get.return_value = _FakeModelListResponse(["gpt-oss-20b"])
+        mock_is_vllm_model_sleeping.return_value = True
+
+        status = get_llm_model_status("gpt-oss-20b")
+
+        self.assertTrue(status["available"])
+        self.assertTrue(status["running"])
+        self.assertTrue(status["sleeping"])
+        self.assertEqual(
+            status["reason"],
+            "Model server is sleeping. It will wake automatically on first request.",
+        )
+
     @patch("api.services.requests.get")
     def test_get_llm_model_status_grays_out_stopped_model(self, mock_get):
         mock_get.side_effect = RequestException("Connection refused")
@@ -274,7 +374,7 @@ class VllmServiceTests(SimpleTestCase):
     ):
         mock_client = mock_build_client.return_value
         mock_client.chat.completions.create.return_value = _FakeCompletion(" Hello from vLLM ")
-        mock_tokenize_vllm_messages.return_value = (9, 131072)
+        mock_tokenize_vllm_messages.return_value = (9, 32768)
         mock_propagate_attributes.return_value = nullcontext()
 
         content = request_vllm_chat(
@@ -302,7 +402,7 @@ class VllmServiceTests(SimpleTestCase):
             model="gpt-oss-20b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
-            max_tokens=131063,
+            max_tokens=32759,
         )
 
     @patch("api.services.request_ollama_chat")
@@ -363,7 +463,7 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
-            max_tokens=40943,
+            max_tokens=32751,
             reasoning_effort="none",
         )
 
@@ -378,7 +478,7 @@ class VllmServiceTests(SimpleTestCase):
     ):
         mock_client = mock_build_client.return_value
         mock_client.chat.completions.create.return_value = _FakeCompletion(" Hello ")
-        mock_tokenize_vllm_messages.return_value = (10, 40960)
+        mock_tokenize_vllm_messages.return_value = (10, 32768)
         mock_propagate_attributes.return_value = nullcontext()
 
         content = request_vllm_chat(
@@ -392,7 +492,7 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3-32b-awq",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
-            max_tokens=40950,
+            max_tokens=32758,
             extra_body={"chat_template_kwargs": {"enable_thinking": True}},
         )
 
@@ -418,7 +518,7 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
-            max_tokens=40943,
+            max_tokens=32751,
             reasoning_effort="medium",
         )
 
@@ -433,7 +533,7 @@ class VllmServiceTests(SimpleTestCase):
     ):
         mock_client = mock_build_client.return_value
         mock_client.chat.completions.create.return_value = _FakeCompletion(" ")
-        mock_tokenize_vllm_messages.return_value = (9, 131072)
+        mock_tokenize_vllm_messages.return_value = (9, 32768)
         mock_propagate_attributes.return_value = nullcontext()
 
         with self.assertRaisesMessage(
@@ -469,7 +569,7 @@ class VllmServiceTests(SimpleTestCase):
             _FakeStreamChunk(None),
             _FakeStreamChunk(" from vLLM"),
         ]
-        mock_tokenize_vllm_messages.return_value = (9, 131072)
+        mock_tokenize_vllm_messages.return_value = (9, 32768)
         mock_propagate_attributes.return_value = nullcontext()
 
         chunks = list(
@@ -484,7 +584,7 @@ class VllmServiceTests(SimpleTestCase):
             model="gpt-oss-20b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=True,
-            max_tokens=131063,
+            max_tokens=32759,
             stream_options={"include_usage": True},
         )
 
@@ -515,7 +615,7 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             stream=True,
-            max_tokens=40943,
+            max_tokens=32751,
             reasoning_effort="none",
             stream_options={"include_usage": True},
         )
@@ -534,7 +634,7 @@ class VllmServiceTests(SimpleTestCase):
             _FakeStreamChunk(reasoning_content="Plan"),
             _FakeStreamChunk("Answer"),
         ]
-        mock_tokenize_vllm_messages.return_value = (9, 40960)
+        mock_tokenize_vllm_messages.return_value = (9, 32768)
         mock_propagate_attributes.return_value = nullcontext()
 
         chunks = list(
@@ -550,7 +650,7 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3-32b-awq",
             messages=[{"role": "user", "content": "Hello"}],
             stream=True,
-            max_tokens=40951,
+            max_tokens=32759,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             stream_options={"include_usage": True},
         )
