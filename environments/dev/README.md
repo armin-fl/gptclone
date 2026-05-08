@@ -14,6 +14,13 @@ The base `docker-compose.yml` stays stable and contains shared infrastructure.
 Model containers live in `docker-compose.override.yml`, which Docker Compose
 merges automatically when you run commands from this directory.
 
+Nginx is included as a no-cache development reverse proxy using the official
+full Debian stable image (`nginx:1.30.0-trixie`). It listens on port 80 by
+default and forwards app traffic to the local Next.js dev server on port 3000.
+The `/api` routes intentionally stay on Next.js so the BFF/auth cookie flow keeps
+working. Django-only paths (`/admin/`, `/static/`, and `/media/`) are proxied to
+the local Django dev server on port 8000.
+
 ### Start
 
 ```bash
@@ -38,6 +45,12 @@ Langfuse:
 - Login: `admin@example.com` / `admin12345`
 - Dev public key: `pk-lf-dev-project-key`
 - Dev secret key: `sk-lf-dev-secret-key`
+
+Nginx dev proxy:
+
+- App: `http://127.0.0.1` or `http://46.100.12.235`
+- Django admin through proxy: `http://127.0.0.1/admin/` or `http://46.100.12.235/admin/`
+- Override the host port with `NGINX_HTTP_PORT=8080 docker compose up -d nginx`
 
 The vLLM services use the local `vllm:gptclone` image. When Docker shows
 `vllm-gpt-oss-20b Pulling`, it is pulling the vLLM container image layers. The

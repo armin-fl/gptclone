@@ -114,7 +114,10 @@ When prompted, use your phone number as the username value.
 ### Run
 
 ```bash
-python manage.py runserver
+python manage.py runserver 0.0.0.0:8000
 ```
 
-Admin: `http://127.0.0.1:8000/admin/`
+Admin: `http://127.0.0.1:8000/admin/` or `http://46.100.12.235:8000/admin/`
+
+Set `PUBLIC_DEV_HOST` before starting the frontend and backend if the public IP changes.
+With the dev Nginx service running, the proxied admin URL is `http://127.0.0.1/admin/` or `http://46.100.12.235/admin/`.

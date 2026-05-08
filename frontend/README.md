@@ -18,7 +18,11 @@ This frontend provides a ChatGPT-style development UI:
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open `http://localhost:3000`, `http://127.0.0.1:3000`, or `http://46.100.12.235:3000`.
+Set `PUBLIC_DEV_HOST` before starting the frontend and backend if the public IP changes.
+
+When the dev Nginx service is running, use `http://127.0.0.1` or `http://46.100.12.235`.
+Nginx disables caching and proxies HMR/websocket traffic back to this dev server.
 
 ### shadcn
 

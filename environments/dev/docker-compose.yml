@@ -41,8 +41,20 @@ x-langfuse-env: &langfuse-env
   REDIS_PORT: "6379"
   REDIS_AUTH: gptclone-langfuse-redis-secret
   REDIS_TLS_ENABLED: "false"
+  REDIS_BLOCKING_SOCKET_TIMEOUT_MS: "120000"
 
 services:
+  nginx:
+    image: docker.io/nginx:1.30.0-trixie
+    container_name: gptclone-nginx-dev
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   postgres:
     image: postgres:gptclone
     container_name: vllm-postgres-dev

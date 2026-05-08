@@ -16,7 +16,8 @@ IS_TEST_COMMAND = any("pytest" in arg or arg == "test" for arg in sys.argv)
 
 SECRET_KEY = "dev-only-secret-key-change-me"
 DEBUG = True
-ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+PUBLIC_DEV_HOST = os.environ.get("PUBLIC_DEV_HOST", "46.100.12.235")
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", PUBLIC_DEV_HOST]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -113,8 +114,19 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-CORS_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
-CSRF_TRUSTED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+FRONTEND_DEV_ORIGINS = [
+    "http://localhost",
+    "http://127.0.0.1",
+    f"http://{PUBLIC_DEV_HOST}",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    f"http://{PUBLIC_DEV_HOST}:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    f"http://{PUBLIC_DEV_HOST}:8080",
+]
+CORS_ALLOWED_ORIGINS = FRONTEND_DEV_ORIGINS
+CSRF_TRUSTED_ORIGINS = FRONTEND_DEV_ORIGINS
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],

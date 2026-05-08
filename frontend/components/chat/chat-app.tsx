@@ -178,18 +178,6 @@ const MODEL_OPTIONS: ModelOption[] = [
     description: "Local reasoning vLLM AWQ model",
     enabled: true,
   },
-  {
-    id: "fast-placeholder",
-    label: "Fast model",
-    description: "Subscription placeholder",
-    enabled: false,
-  },
-  {
-    id: "reasoning-placeholder",
-    label: "Reasoning model",
-    description: "Subscription placeholder",
-    enabled: false,
-  },
 ];
 
 const THINKING_EFFORT_LABELS: Record<ThinkingEffort, string> = {
@@ -316,6 +304,16 @@ function normalizePhoneDraft(value: string): string {
   }
 
   return `${PHONE_PREFIX}${digits.slice(0, PHONE_REST_LENGTH)}`;
+}
+
+function normalizePhoneRestDraft(value: string): string {
+  const digits = getDigits(value);
+
+  if (digits.startsWith(PHONE_PREFIX) && digits.length > PHONE_REST_LENGTH) {
+    return digits.slice(PHONE_PREFIX.length, PHONE_LENGTH);
+  }
+
+  return digits.slice(0, PHONE_REST_LENGTH);
 }
 
 function getStoredPhoneNumber(value: string | null): string {
@@ -518,7 +516,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const [otpInput, setOtpInput] = useState("");
   const [devOtp, setDevOtp] = useState("");
   const [isOtpRequested, setIsOtpRequested] = useState(false);
-  const [isPhoneInputFocused, setIsPhoneInputFocused] = useState(false);
+  const [focusedPhoneDigitIndex, setFocusedPhoneDigitIndex] = useState<number | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>(initialData?.conversations.results ?? []);
   const [activeConversation, setActiveConversation] = useState<ConversationDetail | null>(
     initialData?.activeConversation ?? null,
@@ -589,6 +587,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const contentNoticeFrameRef = useRef<number | null>(null);
   const hideJumpFrameRef = useRef<number | null>(null);
   const scrollFrameRef = useRef<number | null>(null);
+  const phoneDigitInputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const nextPendingMessageIdRef = useRef(-1);
   const isAtBottomRef = useRef(true);
   const previousMessagesKeyRef = useRef("");
@@ -2335,6 +2334,84 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     );
   }
 
+  function focusPhoneDigit(index: number) {
+    const clampedIndex = Math.max(0, Math.min(PHONE_REST_LENGTH - 1, index));
+
+    window.requestAnimationFrame(() => {
+      const input = phoneDigitInputRefs.current[clampedIndex];
+      input?.focus();
+      input?.select();
+    });
+  }
+
+  function updatePhoneRestInput(nextRestInput: string) {
+    setPhoneInput(`${PHONE_PREFIX}${normalizePhoneRestDraft(nextRestInput)}`);
+  }
+
+  function insertPhoneDigitsAt(index: number, value: string) {
+    const digits = normalizePhoneRestDraft(value);
+
+    if (!digits) {
+      return;
+    }
+
+    const startIndex = Math.min(index, phoneRestInput.length);
+    const slots = phoneRestInput.split("");
+
+    digits.split("").forEach((digit, offset) => {
+      const slotIndex = startIndex + offset;
+      if (slotIndex < PHONE_REST_LENGTH) {
+        slots[slotIndex] = digit;
+      }
+    });
+
+    updatePhoneRestInput(slots.join("").slice(0, PHONE_REST_LENGTH));
+    focusPhoneDigit(Math.min(startIndex + digits.length, PHONE_REST_LENGTH - 1));
+  }
+
+  function deletePhoneDigitAt(index: number) {
+    if (!phoneRestInput) {
+      focusPhoneDigit(0);
+      return;
+    }
+
+    const targetIndex = Math.min(index, phoneRestInput.length - 1);
+    const slots = phoneRestInput.split("");
+    slots.splice(targetIndex, 1);
+    updatePhoneRestInput(slots.join(""));
+    focusPhoneDigit(Math.max(targetIndex - 1, 0));
+  }
+
+  function handlePhoneDigitKeyDown(event: React.KeyboardEvent<HTMLInputElement>, index: number) {
+    if (event.key === "Backspace") {
+      event.preventDefault();
+      deletePhoneDigitAt(index);
+      return;
+    }
+
+    if (event.key === "Delete") {
+      event.preventDefault();
+      if (index < phoneRestInput.length) {
+        const slots = phoneRestInput.split("");
+        slots.splice(index, 1);
+        updatePhoneRestInput(slots.join(""));
+      }
+      focusPhoneDigit(index);
+      return;
+    }
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      focusPhoneDigit(index - 1);
+      return;
+    }
+
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      focusPhoneDigit(index + 1);
+    }
+  }
+
   async function handleRequestOtp(event: React.FormEvent) {
     event.preventDefault();
     const clean = getSubmitPhoneNumber(phoneInput);
@@ -3559,36 +3636,43 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                     </div>
 
                     <div className="space-y-3">
-                      <div
-                        className={cn(
-                          "flex min-h-12 items-center gap-3 rounded-xl border px-3 transition",
-                          isPhoneInputFocused
-                            ? "border-[#10a37f] shadow-[0_0_0_3px_rgba(16,163,127,0.16)]"
-                            : isDark
-                              ? "border-[#4a4a4a]"
-                              : "border-[#dedede]",
-                          isDark ? "bg-[#212121] text-[#ececec]" : "bg-white text-[#171717]",
-                        )}
-                      >
+                      <div className="flex min-h-12 items-center gap-2">
                         <span
                           className={cn(
-                            "grid h-9 w-11 shrink-0 select-none place-items-center rounded-lg font-mono text-sm font-semibold",
-                            isDark ? "bg-[#303030] text-[#ececec]" : "bg-[#f2f2f2] text-[#171717]",
+                            "grid h-8 w-10 shrink-0 select-none place-items-center rounded-lg border font-mono text-sm font-semibold transition",
+                            focusedPhoneDigitIndex === null && !phoneRestInput
+                              ? "border-[#10a37f]"
+                              : isDark
+                                ? "border-[#4a4a4a]"
+                                : "border-[#d7d7d7]",
+                            isDark ? "bg-[#2b2b2b] text-[#ececec]" : "bg-[#fafafa] text-[#171717]",
                           )}
                         >
                           {PHONE_PREFIX}
                         </span>
-                        <div className="relative grid min-w-0 flex-1 grid-cols-9 gap-1.5">
+                        <div className="flex min-w-0 flex-1 items-center justify-between gap-1.5">
                           {phoneDigitSlots.map((digit, index) => {
-                            const isCurrentSlot =
-                              isPhoneInputFocused &&
-                              index === Math.min(phoneRestInput.length, PHONE_REST_LENGTH - 1);
-
                             return (
-                              <span
+                              <input
                                 key={index}
+                                ref={(input) => {
+                                  phoneDigitInputRefs.current[index] = input;
+                                }}
+                                value={digit}
+                                onChange={(event) => insertPhoneDigitsAt(index, event.target.value)}
+                                onFocus={() => setFocusedPhoneDigitIndex(index)}
+                                onBlur={() => setFocusedPhoneDigitIndex(null)}
+                                onKeyDown={(event) => handlePhoneDigitKeyDown(event, index)}
+                                onPaste={(event) => {
+                                  event.preventDefault();
+                                  insertPhoneDigitsAt(index, event.clipboardData.getData("text"));
+                                }}
+                                inputMode="numeric"
+                                autoComplete={index === 0 ? "tel-national" : "off"}
+                                aria-label={`Phone number digit ${index + 1} after 09`}
+                                maxLength={1}
                                 className={cn(
-                                  "grid h-9 min-w-0 place-items-center rounded-md border text-sm font-semibold transition",
+                                  "h-8 w-7 rounded-lg border text-center font-mono text-sm font-semibold outline-none transition",
                                   digit
                                     ? isDark
                                       ? "border-[#4a4a4a] bg-[#2b2b2b] text-[#ececec]"
@@ -3596,24 +3680,11 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                                     : isDark
                                       ? "border-[#3a3a3a] bg-[#242424] text-[#6f6f6f]"
                                       : "border-[#e6e6e6] bg-[#f8f8f8] text-[#b0b0b0]",
-                                  isCurrentSlot ? "border-[#10a37f]" : "",
+                                  focusedPhoneDigitIndex === index ? "border-[#10a37f]" : "",
                                 )}
-                              >
-                                {digit}
-                              </span>
+                              />
                             );
                           })}
-                          <input
-                            value={phoneRestInput}
-                            onChange={(event) => setPhoneInput(normalizePhoneDraft(event.target.value))}
-                            onFocus={() => setIsPhoneInputFocused(true)}
-                            onBlur={() => setIsPhoneInputFocused(false)}
-                            inputMode="numeric"
-                            autoComplete="tel-national"
-                            aria-label="Phone number after 09"
-                            maxLength={PHONE_LENGTH}
-                            className="absolute inset-0 h-full w-full cursor-text bg-transparent text-transparent caret-transparent outline-none"
-                          />
                         </div>
                       </div>
                       {!isPhoneNumberValid && phoneRestInput ? (
