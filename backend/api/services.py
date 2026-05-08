@@ -30,6 +30,7 @@ THINKING_BLOCK_RE = re.compile(r"<think\b[^>]*>(.*?)</think>", re.IGNORECASE | r
 INCOMPLETE_THINKING_BLOCK_RE = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
 VLLM_CHAT_TEMPLATE_THINKING_TOGGLE = "vllm_chat_template"
 OLLAMA_REASONING_EFFORT_THINKING_TOGGLE = "ollama_reasoning_effort"
+THINKING_EFFORT_VALUES = {"none", "short", "medium", "long"}
 
 
 def strip_thinking_blocks(content: str) -> str:
@@ -60,6 +61,34 @@ def model_supports_thinking_toggle(model: str) -> bool:
         VLLM_CHAT_TEMPLATE_THINKING_TOGGLE,
         OLLAMA_REASONING_EFFORT_THINKING_TOGGLE,
     }
+
+
+def model_thinking_control(model: str) -> str:
+    toggle_type = _thinking_toggle_type(model)
+    if toggle_type == OLLAMA_REASONING_EFFORT_THINKING_TOGGLE:
+        return "effort"
+    if toggle_type == VLLM_CHAT_TEMPLATE_THINKING_TOGGLE:
+        return "toggle"
+    return "none"
+
+
+def model_thinking_efforts(model: str) -> list[str]:
+    control = model_thinking_control(model)
+    if control == "effort":
+        return ["none", "short", "medium", "long"]
+    if control == "toggle":
+        return ["none", "medium"]
+    return ["none"]
+
+
+def _normalize_thinking_effort(
+    thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
+) -> str:
+    effort = str(thinking_effort or "").lower()
+    if effort in THINKING_EFFORT_VALUES:
+        return effort
+    return "medium" if thinking_enabled else "none"
 
 
 # Flow 4: called by ConversationSendMessageView.post() to turn previous Message rows into LLM context.
@@ -173,6 +202,8 @@ def get_llm_model_status(model: str) -> dict:
         "label": str(settings.LLM_MODELS.get(model, {}).get("label", model)),
         "provider": provider or str(settings.LLM_MODELS.get(model, {}).get("provider", "")),
         "supports_thinking_toggle": model_supports_thinking_toggle(model),
+        "thinking_control": model_thinking_control(model),
+        "thinking_efforts": model_thinking_efforts(model),
         "managed": is_managed,
         "running": server_reachable,
         "sleeping": is_sleeping,
@@ -361,6 +392,7 @@ def _tokenize_vllm_messages(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
 ) -> tuple[int | None, int | None]:
     try:
         base_url = get_vllm_base_url(model)
@@ -371,7 +403,8 @@ def _tokenize_vllm_messages(
         )
         payload = {"model": model, "messages": messages}
         if _thinking_toggle_type(model) == VLLM_CHAT_TEMPLATE_THINKING_TOGGLE:
-            payload["chat_template_kwargs"] = {"enable_thinking": thinking_enabled}
+            effort = _normalize_thinking_effort(thinking_enabled, thinking_effort)
+            payload["chat_template_kwargs"] = {"enable_thinking": effort != "none"}
         response = requests.post(
             f"{_server_root_from_openai_base_url(base_url)}/tokenize",
             headers=headers,
@@ -392,6 +425,7 @@ def _max_completion_tokens(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
 ) -> int:
     config = settings.LLM_MODELS.get(model, {})
     context_tokens = _positive_int(config.get("max_context_tokens"))
@@ -402,6 +436,7 @@ def _max_completion_tokens(
             model,
             messages,
             thinking_enabled=thinking_enabled,
+            thinking_effort=thinking_effort,
         )
         context_tokens = server_context_tokens or context_tokens
 
@@ -421,23 +456,26 @@ def _chat_completion_options(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
     stream: bool = False,
 ) -> dict:
+    effort = _normalize_thinking_effort(thinking_enabled, thinking_effort)
     options = {
         "max_tokens": _max_completion_tokens(
             provider=provider,
             model=model,
             messages=messages,
             thinking_enabled=thinking_enabled,
+            thinking_effort=effort,
         ),
     }
     toggle_type = _thinking_toggle_type(model)
     if toggle_type == VLLM_CHAT_TEMPLATE_THINKING_TOGGLE:
         options["extra_body"] = {
-            "chat_template_kwargs": {"enable_thinking": thinking_enabled},
+            "chat_template_kwargs": {"enable_thinking": effort != "none"},
         }
     elif toggle_type == OLLAMA_REASONING_EFFORT_THINKING_TOGGLE:
-        options["reasoning_effort"] = "medium" if thinking_enabled else "none"
+        options["reasoning_effort"] = effort
     if stream:
         options["stream_options"] = {"include_usage": True}
     return options
@@ -467,6 +505,7 @@ def request_vllm_chat(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
     langfuse_session_id: str | None = None,
     langfuse_user_id: str | None = None,
     langfuse_metadata: dict | None = None,
@@ -491,6 +530,7 @@ def request_vllm_chat(
                     model=model,
                     messages=messages,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                 ),
             )
     except OpenAIError as exc:
@@ -508,6 +548,7 @@ def stream_vllm_chat(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
     langfuse_session_id: str | None = None,
     langfuse_user_id: str | None = None,
     langfuse_metadata: dict | None = None,
@@ -532,6 +573,7 @@ def stream_vllm_chat(
                     model=model,
                     messages=messages,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                     stream=True,
                 ),
             )
@@ -545,6 +587,7 @@ def request_ollama_chat(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
     langfuse_session_id: str | None = None,
     langfuse_user_id: str | None = None,
     langfuse_metadata: dict | None = None,
@@ -569,6 +612,7 @@ def request_ollama_chat(
                     model=model,
                     messages=messages,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                 ),
             )
     except OpenAIError as exc:
@@ -586,6 +630,7 @@ def stream_ollama_chat(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
     langfuse_session_id: str | None = None,
     langfuse_user_id: str | None = None,
     langfuse_metadata: dict | None = None,
@@ -610,6 +655,7 @@ def stream_ollama_chat(
                     model=model,
                     messages=messages,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                     stream=True,
                 ),
             )
@@ -623,16 +669,21 @@ def request_llm_chat(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
     langfuse_session_id: str | None = None,
     langfuse_user_id: str | None = None,
     langfuse_metadata: dict | None = None,
 ) -> str:
     provider = get_llm_model_config(model).get("provider")
+    effort_kwargs = {}
+    if thinking_effort is not None:
+        effort_kwargs["thinking_effort"] = thinking_effort
     if provider == "vllm":
         return request_vllm_chat(
             model=model,
             messages=messages,
             thinking_enabled=thinking_enabled,
+            **effort_kwargs,
             langfuse_session_id=langfuse_session_id,
             langfuse_user_id=langfuse_user_id,
             langfuse_metadata=langfuse_metadata,
@@ -642,6 +693,7 @@ def request_llm_chat(
             model=model,
             messages=messages,
             thinking_enabled=thinking_enabled,
+            **effort_kwargs,
             langfuse_session_id=langfuse_session_id,
             langfuse_user_id=langfuse_user_id,
             langfuse_metadata=langfuse_metadata,
@@ -654,16 +706,21 @@ def stream_llm_chat(
     model: str,
     messages: list[dict[str, str]],
     thinking_enabled: bool = False,
+    thinking_effort: str | None = None,
     langfuse_session_id: str | None = None,
     langfuse_user_id: str | None = None,
     langfuse_metadata: dict | None = None,
 ):
     provider = get_llm_model_config(model).get("provider")
+    effort_kwargs = {}
+    if thinking_effort is not None:
+        effort_kwargs["thinking_effort"] = thinking_effort
     if provider == "vllm":
         yield from stream_vllm_chat(
             model=model,
             messages=messages,
             thinking_enabled=thinking_enabled,
+            **effort_kwargs,
             langfuse_session_id=langfuse_session_id,
             langfuse_user_id=langfuse_user_id,
             langfuse_metadata=langfuse_metadata,
@@ -674,6 +731,7 @@ def stream_llm_chat(
             model=model,
             messages=messages,
             thinking_enabled=thinking_enabled,
+            **effort_kwargs,
             langfuse_session_id=langfuse_session_id,
             langfuse_user_id=langfuse_user_id,
             langfuse_metadata=langfuse_metadata,

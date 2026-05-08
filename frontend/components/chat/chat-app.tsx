@@ -67,6 +67,8 @@ import type {
   ConversationPage,
   InitialChatData,
   LlmModelStatus,
+  ThinkingControl,
+  ThinkingEffort,
 } from "@/lib/types";
 import { ChatMessageRenderer } from "@/components/chat/chat-message-renderer";
 import { Button } from "@/components/ui/button";
@@ -106,6 +108,8 @@ interface ModelOption {
   description: string;
   enabled: boolean;
   supportsThinkingToggle?: boolean;
+  thinkingControl?: ThinkingControl;
+  thinkingEfforts?: ThinkingEffort[];
 }
 
 const MODEL_OPTIONS: ModelOption[] = [
@@ -121,6 +125,8 @@ const MODEL_OPTIONS: ModelOption[] = [
     description: "Local Ollama model",
     enabled: true,
     supportsThinkingToggle: true,
+    thinkingControl: "effort",
+    thinkingEfforts: ["none", "short", "medium", "long"],
   },
   {
     id: "qwen3-32b-awq",
@@ -128,6 +134,8 @@ const MODEL_OPTIONS: ModelOption[] = [
     description: "Local vLLM AWQ model",
     enabled: true,
     supportsThinkingToggle: true,
+    thinkingControl: "toggle",
+    thinkingEfforts: ["none", "medium"],
   },
   {
     id: "qwq-32b-awq",
@@ -154,6 +162,73 @@ const MODEL_OPTIONS: ModelOption[] = [
     enabled: false,
   },
 ];
+
+const THINKING_EFFORT_LABELS: Record<ThinkingEffort, string> = {
+  none: "Off",
+  short: "Short",
+  medium: "Medium",
+  long: "Long",
+};
+
+function getModelThinkingControl(
+  model: ModelOption,
+  status?: LlmModelStatus,
+): ThinkingControl {
+  if (status?.thinking_control) {
+    return status.thinking_control;
+  }
+  if (model.thinkingControl) {
+    return model.thinkingControl;
+  }
+  return (status?.supports_thinking_toggle ?? model.supportsThinkingToggle ?? false) ? "toggle" : "none";
+}
+
+function getModelThinkingEfforts(model: ModelOption, status?: LlmModelStatus): ThinkingEffort[] {
+  const control = getModelThinkingControl(model, status);
+  const efforts = status?.thinking_efforts ?? model.thinkingEfforts;
+  if (efforts?.length) {
+    return efforts;
+  }
+  if (control === "effort") {
+    return ["none", "short", "medium", "long"];
+  }
+  if (control === "toggle") {
+    return ["none", "medium"];
+  }
+  return ["none"];
+}
+
+function normalizeThinkingEffortForModel(
+  effort: ThinkingEffort,
+  allowedEfforts: ThinkingEffort[],
+): ThinkingEffort {
+  if (allowedEfforts.includes(effort)) {
+    return effort;
+  }
+  if (effort !== "none" && allowedEfforts.includes("medium")) {
+    return "medium";
+  }
+  return "none";
+}
+
+function getThinkingOptions(
+  control: ThinkingControl,
+  allowedEfforts: ThinkingEffort[],
+): Array<{ value: ThinkingEffort; label: string }> {
+  if (control === "effort") {
+    return (["none", "short", "medium", "long"] as ThinkingEffort[])
+      .filter((effort) => allowedEfforts.includes(effort))
+      .map((effort) => ({ value: effort, label: THINKING_EFFORT_LABELS[effort] }));
+  }
+  if (control === "toggle") {
+    const toggleOptions: Array<{ value: ThinkingEffort; label: string }> = [
+      { value: "none", label: "Off" },
+      { value: "medium", label: "On" },
+    ];
+    return toggleOptions.filter((option) => allowedEfforts.includes(option.value));
+  }
+  return [{ value: "none", label: "Off" }];
+}
 
 const DIGIT_RANGE_STARTS = [
   0x0660,
@@ -420,13 +495,13 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     initialData?.activeConversation ?? null,
   );
   const [isComposingNewChat, setIsComposingNewChat] = useState(
-    Boolean(initialData?.user && !initialData.activeConversation && !initialData.conversations.results.length),
+    Boolean(initialData?.user && !initialData.activeConversation),
   );
   const [searchQuery, setSearchQuery] = useState("");
   const [draft, setDraft] = useState("");
   const [systemInstruction, setSystemInstruction] = useState(DEFAULT_SYSTEM_INSTRUCTION);
   const [selectedModel, setSelectedModel] = useState(MODEL_OPTIONS[0].id);
-  const [thinkingEnabled, setThinkingEnabled] = useState(false);
+  const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>("none");
   const [modelStatuses, setModelStatuses] = useState<Record<string, LlmModelStatus>>({});
   const [isRefreshingModelStatuses, setIsRefreshingModelStatuses] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
@@ -435,6 +510,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const [error, setError] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const [isThinkingMenuOpen, setIsThinkingMenuOpen] = useState(false);
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null);
   const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -469,6 +545,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const [suppressEditWarning, setSuppressEditWarning] = useState(false);
   const [shouldRememberEditWarningChoice, setShouldRememberEditWarningChoice] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const thinkingMenuRef = useRef<HTMLDivElement | null>(null);
   const chatScrollAreaRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const draftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -485,6 +562,8 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const streamAbortControllerRef = useRef<AbortController | null>(null);
   const isSendingRef = useRef(false);
   const didUseInitialDataRef = useRef(Boolean(initialData?.user));
+  const activeConversationIdRef = useRef<string | null>(initialData?.activeConversation?.id ?? null);
+  const isComposingNewChatRef = useRef(isComposingNewChat);
 
   const isDark = theme === "dark";
   const activeConversationId = activeConversation?.id;
@@ -506,9 +585,17 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   );
   const activeModel = modelOptions.find((model) => model.id === selectedModel) ?? modelOptions[0];
   const activeModelStatus = modelStatuses[selectedModel];
-  const activeModelSupportsThinkingToggle =
-    activeModelStatus?.supports_thinking_toggle ?? activeModel.supportsThinkingToggle ?? false;
-  const requestedThinkingEnabled = activeModelSupportsThinkingToggle && thinkingEnabled;
+  const activeModelThinkingControl = getModelThinkingControl(activeModel, activeModelStatus);
+  const activeModelThinkingEfforts = getModelThinkingEfforts(activeModel, activeModelStatus);
+  const activeThinkingOptions = getThinkingOptions(activeModelThinkingControl, activeModelThinkingEfforts);
+  const activeModelSupportsThinkingToggle = activeThinkingOptions.length > 1;
+  const requestedThinkingEffort = activeModelSupportsThinkingToggle
+    ? normalizeThinkingEffortForModel(thinkingEffort, activeModelThinkingEfforts)
+    : "none";
+  const requestedThinkingEnabled = requestedThinkingEffort !== "none";
+  const activeThinkingOption =
+    activeThinkingOptions.find((option) => option.value === requestedThinkingEffort) ?? activeThinkingOptions[0];
+  const thinkingButtonLabel = activeThinkingOption?.label ?? "Off";
   const isActiveModelAvailable = activeModel.enabled;
   const canSubmitDraft = Boolean(draft.trim()) && isActiveModelAvailable;
   const profileDisplayName = getDisplayName(currentUser, phoneNumber);
@@ -940,6 +1027,14 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   }, [isSending]);
 
   useEffect(() => {
+    activeConversationIdRef.current = activeConversationId ?? null;
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    isComposingNewChatRef.current = isComposingNewChat;
+  }, [isComposingNewChat]);
+
+  useEffect(() => {
     if (!isModelMenuOpen) {
       return;
     }
@@ -953,6 +1048,21 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
   }, [isModelMenuOpen]);
+
+  useEffect(() => {
+    if (!isThinkingMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!thinkingMenuRef.current?.contains(event.target as Node)) {
+        setIsThinkingMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [isThinkingMenuOpen]);
 
   useEffect(() => {
     if (!openConversationMenuId) {
@@ -1029,23 +1139,33 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
         if (!items.length) {
           setActiveConversation(null);
           setIsComposingNewChat(true);
-          return;
-        }
-
-        if (isComposingNewChat) {
-          setActiveConversation(null);
+          setCurrentConversationUrl(null);
           return;
         }
 
         const linkedConversationId = getLinkedConversationId();
+        if (!linkedConversationId && isComposingNewChatRef.current) {
+          setActiveConversation(null);
+          return;
+        }
+
         const targetId =
           (linkedConversationId && items.find((item) => item.id === linkedConversationId)?.id) ||
-          items.find((item) => item.id === activeConversationId)?.id ||
-          items[0].id;
+          items.find((item) => item.id === activeConversationIdRef.current)?.id ||
+          null;
+        if (!targetId) {
+          setActiveConversation(null);
+          setIsComposingNewChat(true);
+          if (!linkedConversationId) {
+            setCurrentConversationUrl(null);
+          }
+          return;
+        }
         const detail = await performAuthenticated(() => getConversation(targetId));
         if (!isCancelled) {
           queryClient.setQueryData(["conversation", targetId], detail);
           setActiveConversation(detail);
+          setIsComposingNewChat(false);
           setCurrentConversationUrl(detail.id);
           scrollToLatest("auto");
         }
@@ -1066,8 +1186,6 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     };
   }, [
     authSession,
-    activeConversationId,
-    isComposingNewChat,
     performAuthenticated,
     queryClient,
     searchQuery,
@@ -1342,6 +1460,10 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       await performAuthenticated(() => deleteConversation(conversation.id));
       setConversations((prev) => prev.filter((item) => item.id !== conversation.id));
       setActiveConversation((prev) => (prev?.id === conversation.id ? null : prev));
+      if (activeConversationId === conversation.id) {
+        setIsComposingNewChat(true);
+        setCurrentConversationUrl(null);
+      }
       if (renamingConversationId === conversation.id) {
         cancelRenameConversation();
       }
@@ -1423,6 +1545,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             model: selectedModel,
             system_instruction: systemInstruction.trim() || undefined,
             thinking_enabled: requestedThinkingEnabled,
+            thinking_effort: requestedThinkingEffort,
           },
           (streamEvent) => {
             if (streamEvent.type === "message") {
@@ -1606,6 +1729,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             model: selectedModel,
             system_instruction: systemInstruction.trim() || undefined,
             thinking_enabled: requestedThinkingEnabled,
+            thinking_effort: requestedThinkingEffort,
           },
           (streamEvent) => {
             didReceiveStreamEvent = true;
@@ -1830,6 +1954,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             model: selectedModel,
             system_instruction: systemInstruction.trim() || undefined,
             thinking_enabled: requestedThinkingEnabled,
+            thinking_effort: requestedThinkingEffort,
           },
           (streamEvent) => {
             didReceiveStreamEvent = true;
@@ -3062,6 +3187,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                 <button
                   type="button"
                   onClick={() => {
+                    setIsThinkingMenuOpen(false);
                     setIsModelMenuOpen((value) => {
                       const nextValue = !value;
                       if (nextValue) {
@@ -3100,9 +3226,10 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                             return;
                           }
                           setSelectedModel(model.id);
-                          if (!(modelStatuses[model.id]?.supports_thinking_toggle ?? model.supportsThinkingToggle ?? false)) {
-                            setThinkingEnabled(false);
-                          }
+                          const nextThinkingEfforts = getModelThinkingEfforts(model, modelStatuses[model.id]);
+                          setThinkingEffort((currentEffort) =>
+                            normalizeThinkingEffortForModel(currentEffort, nextThinkingEfforts),
+                          );
                           setIsModelMenuOpen(false);
                         }}
                         className={cn(
@@ -3489,32 +3616,73 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                     >
                       <Plus className="h-5 w-5" />
                     </button>
-                    <button
-                      type="button"
-                      disabled={!activeModelSupportsThinkingToggle || isSending}
-                      aria-pressed={requestedThinkingEnabled}
-                      title={
-                        activeModelSupportsThinkingToggle
-                          ? "Toggle thinking"
-                          : `${activeModel.label} does not support thinking control`
-                      }
-                      onClick={() => setThinkingEnabled((value) => !value)}
-                      className={cn(
-                        "flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium transition disabled:cursor-not-allowed",
-                        requestedThinkingEnabled
-                          ? "bg-[#0f766e] text-white hover:bg-[#128a80]"
-                          : activeModelSupportsThinkingToggle
-                            ? isDark
-                              ? "text-[#d7d7d7] hover:bg-[#3f3f3f]"
-                              : "text-[#2f2f2f] hover:bg-[#f2f2f2]"
-                            : isDark
-                              ? "text-[#777777]"
-                              : "text-[#a0a0a0]",
-                      )}
-                    >
-                      <Brain className="h-4 w-4" />
-                      <span className="hidden sm:inline">Thinking</span>
-                    </button>
+                    <div ref={thinkingMenuRef} className="relative shrink-0">
+                      <button
+                        type="button"
+                        disabled={!activeModelSupportsThinkingToggle || isSending}
+                        aria-expanded={isThinkingMenuOpen}
+                        title={
+                          activeModelSupportsThinkingToggle
+                            ? "Choose thinking level"
+                            : `${activeModel.label} does not support thinking control`
+                        }
+                        onClick={() => {
+                          if (!activeModelSupportsThinkingToggle || isSending) {
+                            return;
+                          }
+                          setIsModelMenuOpen(false);
+                          setIsThinkingMenuOpen((value) => !value);
+                        }}
+                        className={cn(
+                          "flex h-9 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium transition disabled:cursor-not-allowed",
+                          requestedThinkingEnabled
+                            ? "bg-[#0f766e] text-white hover:bg-[#128a80]"
+                            : activeModelSupportsThinkingToggle
+                              ? isDark
+                                ? "text-[#d7d7d7] hover:bg-[#3f3f3f]"
+                                : "text-[#2f2f2f] hover:bg-[#f2f2f2]"
+                              : isDark
+                                ? "text-[#777777]"
+                                : "text-[#a0a0a0]",
+                        )}
+                      >
+                        <Brain className="h-4 w-4" />
+                        <span className="hidden sm:inline">
+                          {activeModelThinkingControl === "effort"
+                            ? `Think: ${thinkingButtonLabel}`
+                            : `Thinking ${thinkingButtonLabel}`}
+                        </span>
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      </button>
+                      {isThinkingMenuOpen ? (
+                        <div
+                          className={cn(
+                            "absolute bottom-11 left-0 z-50 w-40 rounded-xl border p-1 text-sm shadow-2xl",
+                            isDark
+                              ? "border-[#3a3a3a] bg-[#2f2f2f] text-[#ececec]"
+                              : "border-[#dedede] bg-white text-[#171717]",
+                          )}
+                        >
+                          {activeThinkingOptions.map((option) => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => {
+                                setThinkingEffort(option.value);
+                                setIsThinkingMenuOpen(false);
+                              }}
+                              className={cn(
+                                "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-start transition",
+                                isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+                              )}
+                            >
+                              <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                              {option.value === requestedThinkingEffort ? <Check className="h-4 w-4" /> : null}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                     <Textarea
                       ref={draftTextareaRef}
                       value={draft}

@@ -86,6 +86,16 @@ class VllmServiceTests(SimpleTestCase):
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
         self.assertTrue(serializer.validated_data["thinking_enabled"])
+        self.assertEqual(serializer.validated_data["thinking_effort"], "medium")
+
+    def test_send_message_serializer_accepts_thinking_effort(self):
+        serializer = SendMessageSerializer(
+            data={"content": "Hello", "thinking_effort": "long", "stream": True}
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertTrue(serializer.validated_data["thinking_enabled"])
+        self.assertEqual(serializer.validated_data["thinking_effort"], "long")
 
     @override_settings(
         VLLM_AUTO_SWITCH_ENABLED=True,
@@ -547,6 +557,7 @@ class VllmServiceTests(SimpleTestCase):
             model="qwen3:14b",
             messages=[{"role": "user", "content": "Hello"}],
             thinking_enabled=True,
+            thinking_effort="long",
         )
 
         self.assertEqual(content, "Hello")
@@ -555,7 +566,7 @@ class VllmServiceTests(SimpleTestCase):
             messages=[{"role": "user", "content": "Hello"}],
             stream=False,
             max_tokens=32751,
-            reasoning_effort="medium",
+            reasoning_effort="long",
         )
 
     @patch("api.services.propagate_attributes")

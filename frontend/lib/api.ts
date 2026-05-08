@@ -8,6 +8,7 @@ import type {
   InitialChatData,
   LlmModelsResponse,
   OTPRequestResponse,
+  ThinkingEffort,
   TokenRefreshResponse,
 } from "@/lib/types";
 
@@ -311,6 +312,7 @@ export async function streamMessage(
     model?: string;
     system_instruction?: string;
     thinking_enabled?: boolean;
+    thinking_effort?: ThinkingEffort;
   },
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,
@@ -330,6 +332,7 @@ export async function streamRegenerateMessage(
     model?: string;
     system_instruction?: string;
     thinking_enabled?: boolean;
+    thinking_effort?: ThinkingEffort;
   },
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,
@@ -350,6 +353,7 @@ export async function streamEditMessage(
     model?: string;
     system_instruction?: string;
     thinking_enabled?: boolean;
+    thinking_effort?: ThinkingEffort;
   },
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,

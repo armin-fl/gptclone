@@ -45,7 +45,7 @@ async function loadInitialChatData(conversationId?: string): Promise<InitialChat
   const targetId =
     conversationId && safeConversations.results.some((item) => item.id === conversationId)
       ? conversationId
-      : safeConversations.results[0]?.id;
+      : null;
   const activeConversation = targetId
     ? await djangoGet<ConversationDetail>(`/api/conversations/${targetId}/?limit=50`, accessToken)
     : null;

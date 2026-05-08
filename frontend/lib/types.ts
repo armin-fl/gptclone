@@ -1,4 +1,6 @@
 export type MessageRole = "system" | "user" | "assistant";
+export type ThinkingControl = "none" | "toggle" | "effort";
+export type ThinkingEffort = "none" | "short" | "medium" | "long";
 
 export interface ChatMessage {
   id: number;
@@ -37,6 +39,8 @@ export interface LlmModelStatus {
   label: string;
   provider: string;
   supports_thinking_toggle: boolean;
+  thinking_control?: ThinkingControl;
+  thinking_efforts?: ThinkingEffort[];
   managed?: boolean;
   running?: boolean;
   sleeping?: boolean;

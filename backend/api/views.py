@@ -232,6 +232,7 @@ class ConversationSendMessageView(APIView):
         langfuse_user_id: str | None,
         langfuse_metadata: dict,
         thinking_enabled: bool = False,
+        thinking_effort: str = "none",
         initial_event: dict | None = None,
     ):
         chunks: list[str] = []
@@ -244,6 +245,7 @@ class ConversationSendMessageView(APIView):
                 model=model,
                 messages=llm_messages,
                 thinking_enabled=thinking_enabled,
+                thinking_effort=thinking_effort,
                 langfuse_session_id=str(conversation_id),
                 langfuse_user_id=langfuse_user_id,
                 langfuse_metadata=langfuse_metadata,
@@ -305,6 +307,7 @@ class ConversationSendMessageView(APIView):
         langfuse_user_id: str | None,
         langfuse_metadata: dict,
         thinking_enabled: bool = False,
+        thinking_effort: str = "none",
         initial_event: dict | None = None,
     ) -> StreamingHttpResponse:
         response = StreamingHttpResponse(
@@ -315,6 +318,7 @@ class ConversationSendMessageView(APIView):
                 langfuse_user_id=langfuse_user_id,
                 langfuse_metadata=langfuse_metadata,
                 thinking_enabled=thinking_enabled,
+                thinking_effort=thinking_effort,
                 initial_event=initial_event,
             ),
             content_type="application/x-ndjson",
@@ -353,6 +357,7 @@ class ConversationSendMessageView(APIView):
         )
         wants_stream = serializer.validated_data.get("stream", False)
         thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
+        thinking_effort = serializer.validated_data.get("thinking_effort", "none")
 
         with transaction.atomic():
             # Flow 3: store the USER message first so later history and response include this request.
@@ -380,6 +385,7 @@ class ConversationSendMessageView(APIView):
                 "conversation_id": str(conversation.id),
                 "message_id": user_message.id,
                 "thinking_enabled": thinking_enabled,
+                "thinking_effort": thinking_effort,
             }
 
             if wants_stream:
@@ -395,6 +401,7 @@ class ConversationSendMessageView(APIView):
                     langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                     initial_event={
                         "type": "message",
                         "message": MessageSerializer(user_message).data,
@@ -408,6 +415,7 @@ class ConversationSendMessageView(APIView):
                     model=model,
                     messages=llm_messages,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                     langfuse_session_id=str(conversation.id),
                     langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
@@ -478,6 +486,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
         )
         wants_stream = serializer.validated_data.get("stream", False)
         thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
+        thinking_effort = serializer.validated_data.get("thinking_effort", "none")
 
         with transaction.atomic():
             locked_conversation = (
@@ -541,6 +550,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                 "message_id": user_message.id,
                 "regenerated_message_id": target_message.id,
                 "thinking_enabled": thinking_enabled,
+                "thinking_effort": thinking_effort,
             }
 
             target_message.delete()
@@ -559,6 +569,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                     initial_event={
                         "type": "sync",
                         "conversation": serialize_conversation_detail(locked_conversation),
@@ -570,6 +581,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
                     model=model,
                     messages=llm_messages,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                     langfuse_session_id=str(locked_conversation.id),
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
@@ -686,6 +698,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
         )
         wants_stream = serializer.validated_data.get("stream", False)
         thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
+        thinking_effort = serializer.validated_data.get("thinking_effort", "none")
         edited_content = serializer.validated_data["content"]
 
         with transaction.atomic():
@@ -724,6 +737,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
                 "message_id": target_message.id,
                 "edited_message_id": target_message.id,
                 "thinking_enabled": thinking_enabled,
+                "thinking_effort": thinking_effort,
             }
 
             target_message.content = edited_content
@@ -752,6 +766,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                     initial_event={
                         "type": "sync",
                         "conversation": serialize_conversation_detail(locked_conversation),
@@ -763,6 +778,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
                     model=model,
                     messages=llm_messages,
                     thinking_enabled=thinking_enabled,
+                    thinking_effort=thinking_effort,
                     langfuse_session_id=str(locked_conversation.id),
                     langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
                     langfuse_metadata=langfuse_metadata,
