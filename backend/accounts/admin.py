@@ -8,12 +8,14 @@ from .models import PhoneOTP, User
 @admin.register(User)
 class CustomUserAdmin(UserAdmin):
     ordering = ("-date_joined",)
-    list_display = ("id", "phone_number", "is_staff", "is_active", "date_joined")
+    list_display = ("id", "phone_number", "subscription_plan", "is_staff", "is_active", "date_joined")
+    list_filter = ("subscription_plan", "is_staff", "is_active", "date_joined")
     search_fields = ("phone_number", "first_name", "last_name")
 
     fieldsets = (
         (None, {"fields": ("phone_number", "password")}),
         (_("Personal info"), {"fields": ("first_name", "last_name")}),
+        (_("Subscription"), {"fields": ("subscription_plan",)}),
         (
             _("Permissions"),
             {
@@ -34,7 +36,14 @@ class CustomUserAdmin(UserAdmin):
             None,
             {
                 "classes": ("wide",),
-                "fields": ("phone_number", "password1", "password2", "is_staff", "is_active"),
+                "fields": (
+                    "phone_number",
+                    "password1",
+                    "password2",
+                    "subscription_plan",
+                    "is_staff",
+                    "is_active",
+                ),
             },
         ),
     )

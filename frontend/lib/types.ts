@@ -1,6 +1,7 @@
 export type MessageRole = "system" | "user" | "assistant";
 export type ThinkingControl = "none" | "toggle" | "effort";
 export type ThinkingEffort = "none" | "short" | "medium" | "long";
+export type SubscriptionPlan = "free" | "pro" | "ultra_pro";
 
 export interface ChatMessage {
   id: number;
@@ -91,6 +92,8 @@ export interface AuthUser {
   first_name: string;
   last_name: string;
   profile_image_url: string;
+  subscription_plan: SubscriptionPlan;
+  subscription_plan_label: string;
 }
 
 export interface OTPRequestResponse {

@@ -46,6 +46,8 @@ class PhoneOTPAuthTests(TestCase):
         self.assertEqual(payload["token_type"], "access")
         self.assertEqual(payload["user_id"], str(user.id))
         self.assertEqual(verify_response.data["user"]["phone_number"], "09123456789")
+        self.assertEqual(verify_response.data["user"]["subscription_plan"], User.SubscriptionPlan.FREE)
+        self.assertEqual(verify_response.data["user"]["subscription_plan_label"], "Free")
 
         refresh_response = self.client.post(
             "/api/auth/refresh/",
@@ -61,6 +63,7 @@ class PhoneOTPAuthTests(TestCase):
 
         self.assertEqual(me_response.status_code, 200)
         self.assertEqual(me_response.data["phone_number"], "09123456789")
+        self.assertEqual(me_response.data["subscription_plan"], User.SubscriptionPlan.FREE)
 
     def test_login_requires_existing_user(self):
         response = self.client.post(
@@ -165,6 +168,35 @@ class PhoneOTPAuthTests(TestCase):
         self.assertEqual(user.last_name, "Lovelace")
         self.assertEqual(response.data["first_name"], "Ada")
         self.assertEqual(response.data["last_name"], "Lovelace")
+
+    def test_profile_update_saves_subscription_plan(self):
+        user = User.objects.create_user(phone_number="09100000001")
+        self.authenticate(user)
+
+        response = self.client.patch(
+            "/api/auth/me/",
+            {"subscription_plan": User.SubscriptionPlan.PRO},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        self.assertEqual(user.subscription_plan, User.SubscriptionPlan.PRO)
+        self.assertEqual(response.data["subscription_plan"], User.SubscriptionPlan.PRO)
+        self.assertEqual(response.data["subscription_plan_label"], "Pro")
+
+    def test_profile_update_rejects_invalid_subscription_plan(self):
+        user = User.objects.create_user(phone_number="09100000001")
+        self.authenticate(user)
+
+        response = self.client.patch(
+            "/api/auth/me/",
+            {"subscription_plan": "enterprise"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("subscription_plan", response.data)
 
     def test_authenticated_user_can_change_phone_after_otp_verification(self):
         user = User.objects.create_user(phone_number="09100000001")

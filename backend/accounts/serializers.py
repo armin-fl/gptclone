@@ -31,10 +31,19 @@ class PhoneOTPVerifySerializer(PhoneOTPRequestSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     profile_image_url = serializers.SerializerMethodField()
+    subscription_plan_label = serializers.CharField(source="get_subscription_plan_display", read_only=True)
 
     class Meta:
         model = User
-        fields = ("id", "phone_number", "first_name", "last_name", "profile_image_url")
+        fields = (
+            "id",
+            "phone_number",
+            "first_name",
+            "last_name",
+            "profile_image_url",
+            "subscription_plan",
+            "subscription_plan_label",
+        )
 
     def get_profile_image_url(self, obj: User) -> str:
         if not obj.profile_image:
@@ -47,11 +56,12 @@ class UserSerializer(serializers.ModelSerializer):
 class UserProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ("first_name", "last_name", "profile_image")
+        fields = ("first_name", "last_name", "profile_image", "subscription_plan")
         extra_kwargs = {
             "first_name": {"required": False, "allow_blank": True},
             "last_name": {"required": False, "allow_blank": True},
             "profile_image": {"required": False, "allow_null": True},
+            "subscription_plan": {"required": False},
         }
 
 

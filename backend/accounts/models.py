@@ -9,6 +9,11 @@ from .phone_numbers import phone_validator
 class User(AbstractBaseUser, PermissionsMixin):
     """Custom user model using phone number as the login identity."""
 
+    class SubscriptionPlan(models.TextChoices):
+        FREE = "free", "Free"
+        PRO = "pro", "Pro"
+        ULTRA_PRO = "ultra_pro", "Ultra Pro"
+
     phone_number = models.CharField(
         max_length=20,
         unique=True,
@@ -18,6 +23,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
     profile_image = models.FileField(upload_to="profile-images/", blank=True, null=True)
+    subscription_plan = models.CharField(
+        max_length=20,
+        choices=SubscriptionPlan.choices,
+        default=SubscriptionPlan.FREE,
+        db_index=True,
+    )
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     date_joined = models.DateTimeField(default=timezone.now)

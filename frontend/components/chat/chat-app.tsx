@@ -67,6 +67,7 @@ import type {
   ConversationPage,
   InitialChatData,
   LlmModelStatus,
+  SubscriptionPlan,
   ThinkingControl,
   ThinkingEffort,
 } from "@/lib/types";
@@ -96,7 +97,7 @@ const DEFAULT_SYSTEM_INSTRUCTION =
 
 type Theme = "dark" | "light";
 type AuthMode = "login" | "register";
-type AccountTab = "profile" | "personalization";
+type AccountTab = "profile" | "subscription" | "personalization";
 
 interface AuthSession {
   authenticated: true;
@@ -111,6 +112,34 @@ interface ModelOption {
   thinkingControl?: ThinkingControl;
   thinkingEfforts?: ThinkingEffort[];
 }
+
+interface SubscriptionPlanOption {
+  id: SubscriptionPlan;
+  label: string;
+  description: string;
+  highlights: string[];
+}
+
+const SUBSCRIPTION_PLAN_OPTIONS: SubscriptionPlanOption[] = [
+  {
+    id: "free",
+    label: "Free",
+    description: "Start chatting with the default local model.",
+    highlights: ["Core chat history", "Default model access", "Profile settings"],
+  },
+  {
+    id: "pro",
+    label: "Pro",
+    description: "More room for heavier daily assistant work.",
+    highlights: ["Priority model access", "Longer context workflows", "Faster iteration"],
+  },
+  {
+    id: "ultra_pro",
+    label: "Ultra Pro",
+    description: "Maximum access for deep research and advanced local models.",
+    highlights: ["All model profiles", "Highest limits", "Best for power users"],
+  },
+];
 
 const MODEL_OPTIONS: ModelOption[] = [
   {
@@ -524,6 +553,12 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [subscriptionPlan, setSubscriptionPlan] = useState<SubscriptionPlan>(
+    initialData?.user?.subscription_plan ?? "free",
+  );
+  const [isSavingSubscription, setIsSavingSubscription] = useState(false);
+  const [subscriptionMessage, setSubscriptionMessage] = useState<string | null>(null);
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [changePhoneInput, setChangePhoneInput] = useState(initialData?.user?.phone_number ?? PHONE_PREFIX);
   const [changePhoneOtpInput, setChangePhoneOtpInput] = useState("");
@@ -600,6 +635,13 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const canSubmitDraft = Boolean(draft.trim()) && isActiveModelAvailable;
   const profileDisplayName = getDisplayName(currentUser, phoneNumber);
   const profileImageUrl = currentUser?.profile_image_url || "";
+  const currentSubscriptionPlan = currentUser?.subscription_plan ?? "free";
+  const currentSubscriptionPlanOption =
+    SUBSCRIPTION_PLAN_OPTIONS.find((plan) => plan.id === currentSubscriptionPlan) ?? SUBSCRIPTION_PLAN_OPTIONS[0];
+  const isSubscriptionPlanChanged = subscriptionPlan !== currentSubscriptionPlan;
+  const profileSecondaryText = isAuthenticated
+    ? `${currentUser?.phone_number || phoneNumber} - ${currentSubscriptionPlanOption.label}`
+    : "Not signed in";
   const phoneRestInput = phoneInput.startsWith(PHONE_PREFIX) ? phoneInput.slice(PHONE_PREFIX.length) : "";
   const changePhoneClean = getSubmitPhoneNumber(changePhoneInput);
   const isChangePhoneValid = Boolean(changePhoneClean);
@@ -728,6 +770,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     void signOut().catch(() => undefined);
     setAuthSession(null);
     setCurrentUser(null);
+    setSubscriptionPlan("free");
     setConversations([]);
     setActiveConversation(null);
     setIsComposingNewChat(false);
@@ -796,6 +839,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
         }
         persistAuthSession({ authenticated: true });
         setCurrentUser(session.user);
+        setSubscriptionPlan(session.user.subscription_plan);
         setPhoneNumber(session.user.phone_number);
         setPhoneInput(session.user.phone_number);
         setChangePhoneInput(session.user.phone_number);
@@ -908,6 +952,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
         }
 
         setCurrentUser(user);
+        setSubscriptionPlan(user.subscription_plan);
         setPhoneNumber(user.phone_number);
         setPhoneInput(user.phone_number);
         setChangePhoneInput(user.phone_number);
@@ -1218,6 +1263,12 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       setIsPhoneChangeOtpRequested(false);
     }
 
+    if (tab === "subscription") {
+      setSubscriptionPlan(currentUser?.subscription_plan ?? "free");
+      setSubscriptionMessage(null);
+      setSubscriptionError(null);
+    }
+
     setAccountTab(tab);
     setIsAccountModalOpen(true);
     closeProfileMenus();
@@ -1271,6 +1322,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     try {
       const user = await performAuthenticated(() => updateMe(payload));
       setCurrentUser(user);
+      setSubscriptionPlan(user.subscription_plan);
       setPhoneNumber(user.phone_number);
       setProfileFirstName(user.first_name);
       setProfileLastName(user.last_name);
@@ -1281,6 +1333,31 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       setProfileError(err instanceof Error ? err.message : "Failed to save profile.");
     } finally {
       setIsSavingProfile(false);
+    }
+  }
+
+  async function handleSaveSubscription(event: React.FormEvent) {
+    event.preventDefault();
+    if (!isAuthenticated || isSavingSubscription) {
+      return;
+    }
+
+    const payload = new FormData();
+    payload.append("subscription_plan", subscriptionPlan);
+
+    setIsSavingSubscription(true);
+    setSubscriptionError(null);
+    setSubscriptionMessage(null);
+
+    try {
+      const user = await performAuthenticated(() => updateMe(payload));
+      setCurrentUser(user);
+      setSubscriptionPlan(user.subscription_plan);
+      setSubscriptionMessage("Subscription plan saved.");
+    } catch (err) {
+      setSubscriptionError(err instanceof Error ? err.message : "Failed to save subscription plan.");
+    } finally {
+      setIsSavingSubscription(false);
     }
   }
 
@@ -1346,6 +1423,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     try {
       const user = await performAuthenticated(() => verifyPhoneChangeOtp({ phone_number: clean, otp: code }));
       setCurrentUser(user);
+      setSubscriptionPlan(user.subscription_plan);
       setPhoneNumber(user.phone_number);
       setPhoneInput(user.phone_number);
       setChangePhoneInput(user.phone_number);
@@ -2310,6 +2388,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       const session = await verifyOtp({ phone_number: clean, otp: code, auth_mode: authMode });
       persistAuthSession({ authenticated: true });
       setCurrentUser(session.user);
+      setSubscriptionPlan(session.user.subscription_plan);
       setPhoneNumber(session.user.phone_number);
       setPhoneInput(session.user.phone_number);
       setChangePhoneInput(session.user.phone_number);
@@ -2512,7 +2591,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{profileDisplayName}</p>
             <p className={cn("truncate text-xs", isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]")}>
-              {currentUser?.phone_number || phoneNumber || "Not signed in"}
+              {profileSecondaryText}
             </p>
           </div>
         </div>
@@ -2526,6 +2605,17 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
         >
           <UserRound className="h-4 w-4" />
           <span>Profile</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => openAccountModal("subscription")}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
+            isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+          )}
+        >
+          <Sparkles className="h-4 w-4" />
+          <span>Subscription</span>
         </button>
         <button
           type="button"
@@ -2597,6 +2687,8 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             ? "text-[#f4f4f4] hover:bg-[#303030]"
             : "text-[#303030] hover:bg-[#eeeeee]",
       );
+    const accountTabTitle =
+      accountTab === "profile" ? "Profile" : accountTab === "subscription" ? "Subscription" : "Personalization";
 
     return (
       <div className="fixed inset-0 z-[80] flex items-center justify-center px-4 py-6">
@@ -2642,6 +2734,19 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
               </button>
               <button
                 type="button"
+                onClick={() => {
+                  setSubscriptionPlan(currentUser?.subscription_plan ?? "free");
+                  setSubscriptionMessage(null);
+                  setSubscriptionError(null);
+                  setAccountTab("subscription");
+                }}
+                className={navItemClass("subscription")}
+              >
+                <Sparkles className="h-4 w-4" />
+                <span>Subscription</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setAccountTab("personalization")}
                 className={navItemClass("personalization")}
               >
@@ -2664,9 +2769,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
 
           <section className={cn("min-h-0 overflow-y-auto px-6 py-5", modalIsDark ? "bg-[#212121]" : "bg-white")}>
             <div className={cn("mb-5 border-b pb-4", dividerClass)}>
-              <h2 className="text-lg font-medium leading-7">
-                {accountTab === "profile" ? "Profile" : "Personalization"}
-              </h2>
+              <h2 className="text-lg font-medium leading-7">{accountTabTitle}</h2>
             </div>
 
             {accountTab === "profile" ? (
@@ -2809,6 +2912,115 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                       {phoneChangeMessage ? <p className="mt-3 text-sm text-[#10a37f]">{phoneChangeMessage}</p> : null}
                       {phoneChangeError ? <p className="mt-3 text-sm text-[#ef4444]">{phoneChangeError}</p> : null}
                     </div>
+                  </>
+                )}
+              </div>
+            ) : accountTab === "subscription" ? (
+              <div className="space-y-5">
+                {!isAuthenticated ? (
+                  <div className={cn("rounded-lg border px-4 py-3 text-sm", dividerClass, mutedTextClass)}>
+                    Sign in to choose a subscription plan.
+                  </div>
+                ) : (
+                  <>
+                    <div className={cn("border-b pb-5", dividerClass)}>
+                      <div className="flex flex-wrap items-start justify-between gap-4">
+                        <div>
+                          <h3 className="font-medium">Current plan</h3>
+                          <p className={cn("mt-1 text-sm", mutedTextClass)}>
+                            {currentSubscriptionPlanOption.label} plan
+                          </p>
+                        </div>
+                        <span
+                          className={cn(
+                            "rounded-full px-3 py-1 text-sm font-medium",
+                            modalIsDark ? "bg-[#303030] text-[#f4f4f4]" : "bg-[#f1f1f1] text-[#303030]",
+                          )}
+                        >
+                          Active
+                        </span>
+                      </div>
+                    </div>
+
+                    <form onSubmit={handleSaveSubscription} className="space-y-4">
+                      <div className="grid gap-3">
+                        {SUBSCRIPTION_PLAN_OPTIONS.map((plan) => {
+                          const isSelected = subscriptionPlan === plan.id;
+                          const isCurrent = currentSubscriptionPlan === plan.id;
+
+                          return (
+                            <button
+                              key={plan.id}
+                              type="button"
+                              aria-pressed={isSelected}
+                              onClick={() => {
+                                setSubscriptionPlan(plan.id);
+                                setSubscriptionMessage(null);
+                                setSubscriptionError(null);
+                              }}
+                              className={cn(
+                                "w-full rounded-lg border p-4 text-start transition",
+                                isSelected
+                                  ? modalIsDark
+                                    ? "border-[#10a37f] bg-[#15342c]"
+                                    : "border-[#10a37f] bg-[#ecfdf7]"
+                                  : modalIsDark
+                                    ? "border-[#3a3a3a] bg-[#262626] hover:bg-[#303030]"
+                                    : "border-[#dddddd] bg-[#fafafa] hover:bg-[#f3f3f3]",
+                              )}
+                            >
+                              <span className="flex items-start justify-between gap-3">
+                                <span className="min-w-0">
+                                  <span className="flex flex-wrap items-center gap-2">
+                                    <span className="text-base font-medium">{plan.label}</span>
+                                    {isCurrent ? (
+                                      <span
+                                        className={cn(
+                                          "rounded-full px-2 py-0.5 text-xs font-medium",
+                                          modalIsDark
+                                            ? "bg-[#303030] text-[#d7d7d7]"
+                                            : "bg-white text-[#5f5f5f]",
+                                        )}
+                                      >
+                                        Current
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <span className={cn("mt-1 block text-sm leading-5", mutedTextClass)}>
+                                    {plan.description}
+                                  </span>
+                                </span>
+                                {isSelected ? <Check className="h-5 w-5 shrink-0 text-[#10a37f]" /> : null}
+                              </span>
+                              <span className="mt-3 grid gap-2">
+                                {plan.highlights.map((highlight) => (
+                                  <span key={highlight} className="flex items-center gap-2 text-sm">
+                                    <Check className="h-4 w-4 text-[#10a37f]" />
+                                    <span>{highlight}</span>
+                                  </span>
+                                ))}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Button
+                          type="submit"
+                          disabled={isSavingSubscription || !isSubscriptionPlanChanged}
+                          className="h-9 rounded-full bg-[#10a37f] px-5 text-white hover:bg-[#0d8f6f] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isSavingSubscription ? "Saving..." : "Save plan"}
+                        </Button>
+                        {subscriptionMessage ? (
+                          <span className="text-sm text-[#10a37f]">{subscriptionMessage}</span>
+                        ) : null}
+                        {subscriptionError ? (
+                          <span className="text-sm text-[#ef4444]">{subscriptionError}</span>
+                        ) : null}
+                      </div>
+                    </form>
                   </>
                 )}
               </div>
@@ -3136,7 +3348,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{profileDisplayName}</p>
                 <p className={cn("truncate text-xs", isDark ? "text-[#9b9b9b]" : "text-[#6f6f6f]")}>
-                  {currentUser?.phone_number || phoneNumber || "Not signed in"}
+                  {profileSecondaryText}
                 </p>
               </div>
               <MoreHorizontal className="h-5 w-5 opacity-70" />
