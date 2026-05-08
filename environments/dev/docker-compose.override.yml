@@ -156,3 +156,54 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  vllm-deepseek-r1-distill-qwen-32b-awq:
+    image: vllm:gptclone
+    container_name: vllm-deepseek-r1-distill-qwen-32b-awq-dev
+    profiles: ["deepseek-r1-distill-qwen-32b-awq"]
+    restart: unless-stopped
+    ipc: host
+    environment:
+      VLLM_SERVER_DEV_MODE: "1"
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+      OTEL_SERVICE_NAME: vllm-deepseek-r1-distill-qwen-32b-awq
+    ports:
+      - "127.0.0.1:8004:8000"
+    volumes:
+      - ../../data/huggingface:/root/.cache/huggingface
+      - ../../models/Vllm/deepseek-r1-distill-qwen-32b-awq:/models/deepseek-r1-distill-qwen-32b-awq:ro
+    command:
+      - --model
+      - /models/deepseek-r1-distill-qwen-32b-awq
+      - --served-model-name
+      - deepseek-r1-distill-qwen-32b-awq
+      - --dtype
+      - auto
+      - --cpu-offload-gb
+      - "0"
+      - --offload-group-size
+      - "0"
+      - --gpu-memory-utilization
+      - "${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}"
+      - --max-model-len
+      - "32768"
+      - --kv-cache-dtype
+      - fp8
+      - --max-num-seqs
+      - "${VLLM_32B_MAX_NUM_SEQS:-2}"
+      - --enforce-eager
+      - --generation-config
+      - vllm
+      - --reasoning-parser
+      - deepseek_r1
+      - --enable-sleep-mode
+      - --otlp-traces-endpoint
+      - http://langfuse-web:3000/api/public/otel/v1/traces
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -16,9 +16,11 @@ from accounts.models import User
 from api.models import Conversation, Message
 from .model_runtime import (
     ACTIVE_VLLM_MODEL_KEY,
+    get_vllm_container_config,
     _inflight_cache_key,
     _inflight_count,
     _switch_vllm_model,
+    is_managed_vllm_model,
     managed_vllm_model,
 )
 from .services import (
@@ -209,11 +211,16 @@ class VllmServiceTests(SimpleTestCase):
                 "service_name": "vllm-model-3",
                 "container_name": "vllm-model-3-dev",
             },
+            "model-4": {
+                "service_name": "vllm-model-4",
+                "container_name": "vllm-model-4-dev",
+            },
         },
         VLLM_MODELS={
             "model-1": "http://127.0.0.1:8101/v1",
             "model-2": "http://127.0.0.1:8102/v1",
             "model-3": "http://127.0.0.1:8103/v1",
+            "model-4": "http://127.0.0.1:8104/v1",
         },
     )
     @patch("api.model_runtime._wake_vllm_model")
@@ -230,24 +237,36 @@ class VllmServiceTests(SimpleTestCase):
         cache.set(ACTIVE_VLLM_MODEL_KEY, "model-1", timeout=None)
         mock_container_running.return_value = True
 
-        _switch_vllm_model("model-3")
+        _switch_vllm_model("model-4")
 
-        self.assertEqual(mock_sleep_vllm_model.call_count, 2)
+        self.assertEqual(mock_sleep_vllm_model.call_count, 3)
         mock_sleep_vllm_model.assert_any_call("model-1")
         mock_sleep_vllm_model.assert_any_call("model-2")
-        mock_wake_vllm_model.assert_called_once_with("model-3")
-        mock_wait_for_vllm_ready.assert_called_once_with("model-3")
+        mock_sleep_vllm_model.assert_any_call("model-3")
+        mock_wake_vllm_model.assert_called_once_with("model-4")
+        mock_wait_for_vllm_ready.assert_called_once_with("model-4")
 
     def test_get_available_vllm_models_returns_hardcoded_models(self):
         self.assertEqual(
             get_available_vllm_models(),
-            ["gpt-oss-20b", "qwen3-32b-awq", "qwq-32b-awq"],
+            [
+                "gpt-oss-20b",
+                "qwen3-32b-awq",
+                "qwq-32b-awq",
+                "deepseek-r1-distill-qwen-32b-awq",
+            ],
         )
 
     def test_get_available_llm_models_returns_gateway_models(self):
         self.assertEqual(
             get_available_llm_models(),
-            ["gpt-oss-20b", "qwen3-32b-awq", "qwq-32b-awq", "qwen3:14b"],
+            [
+                "gpt-oss-20b",
+                "qwen3-32b-awq",
+                "qwq-32b-awq",
+                "deepseek-r1-distill-qwen-32b-awq",
+                "qwen3:14b",
+            ],
         )
 
     def test_get_vllm_base_url_routes_by_model_name(self):
@@ -262,6 +281,23 @@ class VllmServiceTests(SimpleTestCase):
         self.assertEqual(
             get_vllm_base_url("qwq-32b-awq"),
             "http://127.0.0.1:8003/v1",
+        )
+        self.assertEqual(
+            get_vllm_base_url("deepseek-r1-distill-qwen-32b-awq"),
+            "http://127.0.0.1:8004/v1",
+        )
+
+    def test_deepseek_context_and_container_config_are_registered(self):
+        model = "deepseek-r1-distill-qwen-32b-awq"
+        config = get_vllm_container_config(model)
+
+        self.assertEqual(settings.VLLM_MODEL_CONTEXT_TOKENS[model], 32768)
+        self.assertTrue(is_managed_vllm_model(model))
+        self.assertIsNotNone(config)
+        self.assertEqual(config.service_name, "vllm-deepseek-r1-distill-qwen-32b-awq")
+        self.assertEqual(
+            config.container_name,
+            "vllm-deepseek-r1-distill-qwen-32b-awq-dev",
         )
 
     def test_get_ollama_base_url_routes_by_model_name(self):

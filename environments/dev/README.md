@@ -26,6 +26,7 @@ vLLM model servers, cold-started automatically when selected:
 - `gpt-oss-20b`: `http://127.0.0.1:8001/v1`
 - `qwen3-32b-awq`: `http://127.0.0.1:8002/v1`
 - `qwq-32b-awq`: `http://127.0.0.1:8003/v1`
+- `deepseek-r1-distill-qwen-32b-awq`: `http://127.0.0.1:8004/v1`
 
 Ollama model servers:
 
@@ -66,19 +67,24 @@ Hugging Face/vLLM-ready model root with `config.json`, tokenizer files, chat
 template, the safetensors index, and safetensors shards. The nested
 `models/Vllm/OpenAI/original` files are not mounted as the served model path.
 
-The Qwen3 32B AWQ and QwQ 32B AWQ vLLM models are loaded from
-`models/Vllm/Qwen3-32B-AWQ` and `models/Vllm/QwQ-32B-AWQ`.
+The Qwen3 32B AWQ, QwQ 32B AWQ, and DeepSeek R1 Distill Qwen 32B AWQ vLLM
+models are loaded from `models/Vllm/Qwen3-32B-AWQ`,
+`models/Vllm/QwQ-32B-AWQ`, and
+`models/Vllm/deepseek-r1-distill-qwen-32b-awq`.
 Their vLLM containers use the model context window: `--max-model-len 32768`,
 `--kv-cache-dtype fp8`, `--max-num-seqs ${VLLM_32B_MAX_NUM_SEQS:-2}`, `--enforce-eager`, and
 `--gpu-memory-utilization ${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}`. CPU model offload is explicitly disabled with
 `--cpu-offload-gb 0` and `--offload-group-size 0`; vLLM still uses CPU for
 normal orchestration, tokenization, networking, and process scheduling. vLLM
 services are profile-gated so `docker compose up -d` does not load every model
-into VRAM.
+into VRAM. The DeepSeek service also uses `--generation-config vllm` so its
+local `generation_config.json` does not disable cache behavior, and
+`--reasoning-parser deepseek_r1` so vLLM can expose reasoning metadata in the
+OpenAI-compatible response.
 The GPT-OSS container uses
 `--max-model-len 32768` and
 `--gpu-memory-utilization ${VLLM_GPT_OSS_20B_GPU_MEMORY_UTILIZATION:-0.60}`.
-These defaults leave headroom for two sleeping vLLM servers' residual CUDA
+These defaults leave headroom for sleeping vLLM servers' residual CUDA
 memory. Raising them can improve KV-cache capacity, but can also make model
 switches fail with CUDA OOM while other servers are asleep.
 Set `VLLM_32B_MAX_NUM_SEQS` before starting a 32B service to tune same-model
@@ -115,7 +121,7 @@ services:
     restart: unless-stopped
     ipc: host
     ports:
-      - "8003:8000"
+      - "127.0.0.1:8010:8000"
     volumes:
       - ../../data/huggingface:/root/.cache/huggingface
     command:
@@ -195,6 +201,7 @@ This dev stack keeps separate containers and data folders from earlier local sta
 - vLLM API container: `vllm-gpt-oss-20b-dev`
 - vLLM Qwen3 32B AWQ API container: `vllm-qwen3-32b-awq-dev`
 - vLLM QwQ 32B AWQ API container: `vllm-qwq-32b-awq-dev`
+- vLLM DeepSeek R1 Distill Qwen 32B AWQ API container: `vllm-deepseek-r1-distill-qwen-32b-awq-dev`
 - Ollama API container: `ollama-qwen3-14b-dev`
 - PostgreSQL container: `vllm-postgres-dev`
 - pgAdmin container: `vllm-pgadmin-dev`

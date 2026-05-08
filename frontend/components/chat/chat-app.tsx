@@ -136,6 +136,12 @@ const MODEL_OPTIONS: ModelOption[] = [
     enabled: true,
   },
   {
+    id: "deepseek-r1-distill-qwen-32b-awq",
+    label: "DeepSeek R1 Distill Qwen 32B AWQ",
+    description: "Local reasoning vLLM AWQ model",
+    enabled: true,
+  },
+  {
     id: "fast-placeholder",
     label: "Fast model",
     description: "Subscription placeholder",

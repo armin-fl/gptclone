@@ -18,6 +18,7 @@ This backend is set up for **development only**.
   - `gpt-oss-20b` -> `POST http://127.0.0.1:8001/v1/chat/completions`
   - `qwen3-32b-awq` -> `POST http://127.0.0.1:8002/v1/chat/completions`
   - `qwq-32b-awq` -> `POST http://127.0.0.1:8003/v1/chat/completions`
+  - `deepseek-r1-distill-qwen-32b-awq` -> `POST http://127.0.0.1:8004/v1/chat/completions`
   - `qwen3:14b` -> `POST http://127.0.0.1:11434/v1/chat/completions`
 - Langfuse tracing for vLLM and Ollama OpenAI-compatible chat completions:
   - Langfuse UI -> `http://127.0.0.1:3001`
@@ -49,11 +50,13 @@ VLLM_MODELS = {
     "gpt-oss-20b": "http://127.0.0.1:8001/v1",
     "qwen3-32b-awq": "http://127.0.0.1:8002/v1",
     "qwq-32b-awq": "http://127.0.0.1:8003/v1",
+    "deepseek-r1-distill-qwen-32b-awq": "http://127.0.0.1:8004/v1",
 }
 VLLM_MODEL_CONTEXT_TOKENS = {
     "gpt-oss-20b": 32768,
     "qwen3-32b-awq": 32768,
     "qwq-32b-awq": 32768,
+    "deepseek-r1-distill-qwen-32b-awq": 32768,
 }
 VLLM_TIMEOUT_SECONDS = 120
 VLLM_AUTO_SWITCH_ENABLED = True
@@ -61,6 +64,7 @@ VLLM_MODEL_CONTAINERS = {
     "gpt-oss-20b": {"service_name": "vllm-gpt-oss-20b", "container_name": "vllm-gpt-oss-20b-dev"},
     "qwen3-32b-awq": {"service_name": "vllm-qwen3-32b-awq", "container_name": "vllm-qwen3-32b-awq-dev"},
     "qwq-32b-awq": {"service_name": "vllm-qwq-32b-awq", "container_name": "vllm-qwq-32b-awq-dev"},
+    "deepseek-r1-distill-qwen-32b-awq": {"service_name": "vllm-deepseek-r1-distill-qwen-32b-awq", "container_name": "vllm-deepseek-r1-distill-qwen-32b-awq-dev"},
 }
 OLLAMA_MODEL = "qwen3:14b"
 OLLAMA_API_KEY = "ollama"
@@ -73,6 +77,7 @@ LLM_MODELS = {
     "gpt-oss-20b": {"provider": "vllm", "base_url": "http://127.0.0.1:8001/v1", "max_context_tokens": 32768},
     "qwen3-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8002/v1", "max_context_tokens": 32768},
     "qwq-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8003/v1", "max_context_tokens": 32768},
+    "deepseek-r1-distill-qwen-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8004/v1", "max_context_tokens": 32768},
     "qwen3:14b": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1", "max_context_tokens": 32768},
 }
 LANGFUSE_BASE_URL = "http://127.0.0.1:3001"
@@ -93,7 +98,7 @@ wakes it, waits until the OpenAI-compatible `/models` endpoint is ready, then
 leaves that server awake for concurrent requests using the same model. A request
 for a different vLLM model waits for current in-flight requests to finish before
 sleeping the active server and waking the new one. Once each vLLM model has
-been selected once, all three containers can remain running with one active and
+been selected once, all managed vLLM containers can remain running with one active and
 the others asleep.
 
 ### Migrations and superuser

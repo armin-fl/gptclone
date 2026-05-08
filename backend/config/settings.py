@@ -143,11 +143,15 @@ VLLM_MODELS = {
     "gpt-oss-20b": "http://127.0.0.1:8001/v1",
     "qwen3-32b-awq": "http://127.0.0.1:8002/v1",
     "qwq-32b-awq": "http://127.0.0.1:8003/v1",
+    "deepseek-r1-distill-qwen-32b-awq": "http://127.0.0.1:8004/v1",
 }
 VLLM_MODEL_CONTEXT_TOKENS = {
     "gpt-oss-20b": int(os.environ.get("VLLM_GPT_OSS_20B_CONTEXT_TOKENS", "32768")),
     "qwen3-32b-awq": int(os.environ.get("VLLM_QWEN3_32B_AWQ_CONTEXT_TOKENS", "32768")),
     "qwq-32b-awq": int(os.environ.get("VLLM_QWQ_32B_AWQ_CONTEXT_TOKENS", "32768")),
+    "deepseek-r1-distill-qwen-32b-awq": int(
+        os.environ.get("VLLM_DEEPSEEK_R1_DISTILL_QWEN_32B_AWQ_CONTEXT_TOKENS", "32768")
+    ),
 }
 VLLM_TIMEOUT_SECONDS = 120
 VLLM_MODEL_CONTAINERS = {
@@ -162,6 +166,10 @@ VLLM_MODEL_CONTAINERS = {
     "qwq-32b-awq": {
         "service_name": "vllm-qwq-32b-awq",
         "container_name": "vllm-qwq-32b-awq-dev",
+    },
+    "deepseek-r1-distill-qwen-32b-awq": {
+        "service_name": "vllm-deepseek-r1-distill-qwen-32b-awq",
+        "container_name": "vllm-deepseek-r1-distill-qwen-32b-awq-dev",
     },
 }
 VLLM_AUTO_SWITCH_ENABLED = env_bool(
