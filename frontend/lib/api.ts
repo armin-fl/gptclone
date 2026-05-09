@@ -73,7 +73,7 @@ async function ensureCsrfToken(): Promise<string> {
   if (existing) {
     return existing;
   }
-  await request<InitialChatData>("/api/auth/session/", { method: "GET" }, { skipCsrf: true });
+  await request<InitialChatData>("/api/auth/session", { method: "GET" }, { skipCsrf: true });
   const refreshed = getCookie(CSRF_COOKIE);
   if (!refreshed) {
     throw new Error("Could not initialize CSRF protection.");
@@ -114,55 +114,55 @@ async function request<T>(path: string, init?: RequestInit, options: RequestOpti
 }
 
 export function getSession() {
-  return request<InitialChatData>("/api/auth/session/");
+  return request<InitialChatData>("/api/auth/session");
 }
 
 export function signOut() {
-  return request<{ detail: string }>("/api/auth/session/", {
+  return request<{ detail: string }>("/api/auth/session", {
     method: "DELETE",
   });
 }
 
 export function requestOtp(phoneNumber: string, authMode: "login" | "register") {
-  return request<OTPRequestResponse>("/api/auth/request-otp/", {
+  return request<OTPRequestResponse>("/api/auth/request-otp", {
     method: "POST",
     body: JSON.stringify({ phone_number: phoneNumber, auth_mode: authMode }),
   });
 }
 
 export function verifyOtp(payload: { phone_number: string; otp: string; auth_mode: "login" | "register" }) {
-  return request<AuthTokenResponse>("/api/auth/verify-otp/", {
+  return request<AuthTokenResponse>("/api/auth/verify-otp", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
 export function refreshAuthToken() {
-  return request<TokenRefreshResponse>("/api/auth/refresh/", {
+  return request<TokenRefreshResponse>("/api/auth/refresh", {
     method: "POST",
   });
 }
 
 export function getMe() {
-  return request<AuthUser>("/api/auth/me/");
+  return request<AuthUser>("/api/auth/me");
 }
 
 export function updateMe(payload: FormData) {
-  return request<AuthUser>("/api/auth/me/", {
+  return request<AuthUser>("/api/auth/me", {
     method: "PATCH",
     body: payload,
   });
 }
 
 export function requestPhoneChangeOtp(phoneNumber: string) {
-  return request<OTPRequestResponse>("/api/auth/change-phone/request-otp/", {
+  return request<OTPRequestResponse>("/api/auth/change-phone/request-otp", {
     method: "POST",
     body: JSON.stringify({ phone_number: phoneNumber }),
   });
 }
 
 export function verifyPhoneChangeOtp(payload: { phone_number: string; otp: string }) {
-  return request<AuthUser>("/api/auth/change-phone/verify-otp/", {
+  return request<AuthUser>("/api/auth/change-phone/verify-otp", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -182,11 +182,11 @@ export function listConversations(
     search.set("q", params.q.trim());
   }
   const suffix = search.toString();
-  return request<ConversationPage>(`/api/conversations/${suffix ? `?${suffix}` : ""}`);
+  return request<ConversationPage>(`/api/conversations${suffix ? `?${suffix}` : ""}`);
 }
 
 export function listModels() {
-  return request<LlmModelsResponse>("/api/models/");
+  return request<LlmModelsResponse>("/api/models");
 }
 
 export function getConversation(
@@ -201,27 +201,27 @@ export function getConversation(
     search.set("limit", String(params.limit));
   }
   const suffix = search.toString();
-  return request<ConversationDetail>(`/api/conversations/${conversationId}/${suffix ? `?${suffix}` : ""}`);
+  return request<ConversationDetail>(`/api/conversations/${conversationId}${suffix ? `?${suffix}` : ""}`);
 }
 
 export function updateConversation(
   conversationId: string,
   payload: { title?: string; is_pinned?: boolean },
 ) {
-  return request<ConversationDetail>(`/api/conversations/${conversationId}/`, {
+  return request<ConversationDetail>(`/api/conversations/${conversationId}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
   });
 }
 
 export function deleteConversation(conversationId: string) {
-  return request<void>(`/api/conversations/${conversationId}/`, {
+  return request<void>(`/api/conversations/${conversationId}`, {
     method: "DELETE",
   });
 }
 
 export function createConversation(payload: { title?: string } = {}) {
-  return request<ConversationDetail>("/api/conversations/", {
+  return request<ConversationDetail>("/api/conversations", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -231,7 +231,7 @@ export function forkConversationFromMessage(
   conversationId: string,
   messageId: number,
 ) {
-  return request<ConversationDetail>(`/api/conversations/${conversationId}/messages/${messageId}/fork/`, {
+  return request<ConversationDetail>(`/api/conversations/${conversationId}/messages/${messageId}/fork`, {
     method: "POST",
   });
 }
@@ -318,7 +318,7 @@ export async function streamMessage(
   signal?: AbortSignal,
 ) {
   await streamChatResponse(
-    `/api/conversations/${conversationId}/messages/`,
+    `/api/conversations/${conversationId}/messages`,
     payload,
     onEvent,
     signal,
@@ -338,7 +338,7 @@ export async function streamRegenerateMessage(
   signal?: AbortSignal,
 ) {
   await streamChatResponse(
-    `/api/conversations/${conversationId}/messages/${messageId}/regenerate/`,
+    `/api/conversations/${conversationId}/messages/${messageId}/regenerate`,
     payload,
     onEvent,
     signal,
@@ -359,7 +359,7 @@ export async function streamEditMessage(
   signal?: AbortSignal,
 ) {
   await streamChatResponse(
-    `/api/conversations/${conversationId}/messages/${messageId}/edit/`,
+    `/api/conversations/${conversationId}/messages/${messageId}/edit`,
     payload,
     onEvent,
     signal,

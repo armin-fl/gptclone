@@ -60,6 +60,10 @@ VLLM_MODEL_CONTEXT_TOKENS = {
 }
 VLLM_TIMEOUT_SECONDS = 120
 VLLM_AUTO_SWITCH_ENABLED = True
+VLLM_SLEEP_MODE_ENABLED = True
+VLLM_SLEEP_LEVEL = 1
+VLLM_SWITCH_SLEEP_LEVEL = 1
+VLLM_WARMUP_SLEEP_LEVEL = 1
 VLLM_MODEL_CONTAINERS = {
     "gpt-oss-20b": {"service_name": "vllm-gpt-oss-20b", "container_name": "vllm-gpt-oss-20b-dev"},
     "qwen3-32b-awq": {"service_name": "vllm-qwen3-32b-awq", "container_name": "vllm-qwen3-32b-awq-dev"},
@@ -93,13 +97,18 @@ OTP_MAX_ATTEMPTS = 5
 The Langfuse SDK reads those values from environment variables if set, otherwise
 the dev defaults above match `environments/dev/docker-compose.yml`.
 With `VLLM_AUTO_SWITCH_ENABLED`, each vLLM request owns one GPU slot: Django
-puts other managed vLLM servers to sleep, starts the requested one if needed,
-wakes it, waits until the OpenAI-compatible `/models` endpoint is ready, then
-leaves that server awake for concurrent requests using the same model. A request
-for a different vLLM model waits for current in-flight requests to finish before
-sleeping the active server and waking the new one. Once each vLLM model has
-been selected once, all managed vLLM containers can remain running with one active and
-the others asleep.
+starts the requested model if needed, wakes it if it is sleeping, waits until
+the OpenAI-compatible `/models` endpoint is ready, then leaves that server awake
+for concurrent requests using the same model. It does not sleep a model just
+because the request finished. A request for a different vLLM model waits for
+current in-flight requests to finish, sleeps the active server at level `1`, and
+wakes the requested one.
+
+To pre-create and warm all managed vLLM containers from the backend, run:
+
+```bash
+python manage.py warmup_vllm_models
+```
 
 ### Migrations and superuser
 

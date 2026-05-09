@@ -1,45 +1,67 @@
+x-vllm-warm-sleep-env: &vllm-warm-sleep-env
+  GPTCLONE_WARM_SLEEP_ON_START: "${GPTCLONE_WARM_SLEEP_ON_START:-1}"
+  GPTCLONE_WARM_SLEEP_LEVEL: "${GPTCLONE_WARM_SLEEP_LEVEL:-1}"
+  GPTCLONE_WARMUP_TIMEOUT_SECONDS: "${GPTCLONE_WARMUP_TIMEOUT_SECONDS:-900}"
+  GPTCLONE_WARMUP_POLL_SECONDS: "${GPTCLONE_WARMUP_POLL_SECONDS:-2}"
+
+x-vllm-warm-sleep-healthcheck: &vllm-warm-sleep-healthcheck
+  test: ["CMD-SHELL", "test -f /tmp/vllm-warm-sleep-ready && curl -fsS http://127.0.0.1:8000/v1/models >/dev/null"]
+  interval: 10s
+  timeout: 5s
+  retries: 90
+  start_period: 5s
+
 services:
-  ollama-qwen3-14b:
-    image: ollama/ollama:latest
-    container_name: ollama-qwen3-14b-dev
-    restart: unless-stopped
-    environment:
-      OLLAMA_HOST: 0.0.0.0:11434
-      OLLAMA_CONTEXT_LENGTH: 32768
-      OLLAMA_MODELS: /root/.ollama/models
-      OLLAMA_KEEP_ALIVE: 10m
-    ports:
-      - "127.0.0.1:11434:11434"
-    volumes:
-      - ../../models/Ollama/Qwen3-14b:/root/.ollama/models
-    healthcheck:
-      test: ["CMD-SHELL", "OLLAMA_HOST=127.0.0.1:11434 ollama list >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+
+
+
+  # ollama-qwen3-14b:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama-qwen3-14b-dev
+  #   restart: unless-stopped
+  #   environment:
+  #     OLLAMA_HOST: 0.0.0.0:11434
+  #     OLLAMA_CONTEXT_LENGTH: 32768
+  #     OLLAMA_MODELS: /root/.ollama/models
+  #     OLLAMA_KEEP_ALIVE: 10m
+  #   ports:
+  #     - "127.0.0.1:11434:11434"
+  #   volumes:
+  #     - ../../models/Ollama/Qwen3-14b:/root/.ollama/models
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "OLLAMA_HOST=127.0.0.1:11434 ollama list >/dev/null 2>&1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 12
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
 
   vllm-gpt-oss-20b:
     image: vllm:gptclone
     container_name: vllm-gpt-oss-20b-dev
-    profiles: ["gpt-oss-20b"]
-    restart: unless-stopped
+    restart: "no"
     ipc: host
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/vllm-warm-sleep-entrypoint
     environment:
+      <<: *vllm-warm-sleep-env
       VLLM_SERVER_DEV_MODE: "1"
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
       OTEL_SERVICE_NAME: vllm-gpt-oss-20b
+      TIKTOKEN_RS_CACHE_DIR: /root/.cache/tiktoken-rs-cache
     ports:
       - "127.0.0.1:8001:8000"
     volumes:
+      - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
       - ../../data/huggingface:/root/.cache/huggingface
+      - ../../data/tiktoken-rs-cache:/root/.cache/tiktoken-rs-cache
       - ../../models/Vllm/OpenAI:/models/gpt-oss-20b:ro
     command:
       - --model
@@ -62,14 +84,21 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck: *vllm-warm-sleep-healthcheck
 
   vllm-qwen3-32b-awq:
     image: vllm:gptclone
     container_name: vllm-qwen3-32b-awq-dev
-    profiles: ["qwen3-32b-awq"]
-    restart: unless-stopped
+    restart: "no"
     ipc: host
+    depends_on:
+      vllm-gpt-oss-20b:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/vllm-warm-sleep-entrypoint
     environment:
+      <<: *vllm-warm-sleep-env
       VLLM_SERVER_DEV_MODE: "1"
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
@@ -77,6 +106,7 @@ services:
     ports:
       - "127.0.0.1:8002:8000"
     volumes:
+      - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
       - ../../data/huggingface:/root/.cache/huggingface
       - ../../models/Vllm/Qwen3-32B-AWQ:/models/qwen3-32b-awq:ro
     command:
@@ -109,14 +139,21 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck: *vllm-warm-sleep-healthcheck
 
   vllm-qwq-32b-awq:
     image: vllm:gptclone
     container_name: vllm-qwq-32b-awq-dev
-    profiles: ["qwq-32b-awq"]
-    restart: unless-stopped
+    restart: "no"
     ipc: host
+    depends_on:
+      vllm-qwen3-32b-awq:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/vllm-warm-sleep-entrypoint
     environment:
+      <<: *vllm-warm-sleep-env
       VLLM_SERVER_DEV_MODE: "1"
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
@@ -124,6 +161,7 @@ services:
     ports:
       - "127.0.0.1:8003:8000"
     volumes:
+      - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
       - ../../data/huggingface:/root/.cache/huggingface
       - ../../models/Vllm/QwQ-32B-AWQ:/models/qwq-32b-awq:ro
     command:
@@ -156,14 +194,21 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck: *vllm-warm-sleep-healthcheck
 
   vllm-deepseek-r1-distill-qwen-32b-awq:
     image: vllm:gptclone
     container_name: vllm-deepseek-r1-distill-qwen-32b-awq-dev
-    profiles: ["deepseek-r1-distill-qwen-32b-awq"]
-    restart: unless-stopped
+    restart: "no"
     ipc: host
+    depends_on:
+      vllm-qwq-32b-awq:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/vllm-warm-sleep-entrypoint
     environment:
+      <<: *vllm-warm-sleep-env
       VLLM_SERVER_DEV_MODE: "1"
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
@@ -171,6 +216,7 @@ services:
     ports:
       - "127.0.0.1:8004:8000"
     volumes:
+      - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
       - ../../data/huggingface:/root/.cache/huggingface
       - ../../models/Vllm/deepseek-r1-distill-qwen-32b-awq:/models/deepseek-r1-distill-qwen-32b-awq:ro
     command:
@@ -207,3 +253,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck: *vllm-warm-sleep-healthcheck

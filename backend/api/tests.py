@@ -1,7 +1,7 @@
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from django.conf import settings
 from django.core.cache import cache
@@ -22,6 +22,7 @@ from .model_runtime import (
     _switch_vllm_model,
     is_managed_vllm_model,
     managed_vllm_model,
+    warmup_vllm_models,
 )
 from .services import (
     UnsupportedLlmModelError,
@@ -157,6 +158,35 @@ class VllmServiceTests(SimpleTestCase):
 
     @override_settings(
         VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_SLEEP_MODE_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
+        },
+    )
+    @patch("api.model_runtime._sleep_vllm_model")
+    @patch("api.model_runtime.is_vllm_model_sleeping")
+    @patch("api.model_runtime._container_running")
+    def test_managed_vllm_model_does_not_sleep_after_same_model_request(
+        self,
+        mock_container_running,
+        mock_is_vllm_model_sleeping,
+        mock_sleep_vllm_model,
+    ):
+        cache.set(ACTIVE_VLLM_MODEL_KEY, "model-1", timeout=None)
+        mock_container_running.return_value = True
+        mock_is_vllm_model_sleeping.return_value = False
+
+        with managed_vllm_model("model-1"):
+            self.assertEqual(_inflight_count("model-1"), 1)
+
+        self.assertEqual(_inflight_count("model-1"), 0)
+        mock_sleep_vllm_model.assert_not_called()
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
         VLLM_MODEL_CONTAINERS={
             "model-1": {
                 "service_name": "vllm-model-1",
@@ -200,7 +230,7 @@ class VllmServiceTests(SimpleTestCase):
 
         self.assertEqual(_inflight_count("model-2"), 0)
         mock_sleep.assert_called()
-        mock_sleep_vllm_model.assert_called_once_with("model-1")
+        mock_sleep_vllm_model.assert_called_once_with("model-1", level=1)
         mock_wake_vllm_model.assert_called_once_with("model-2")
         mock_start_container.assert_not_called()
         mock_wait_for_vllm_ready.assert_called_once_with("model-2")
@@ -237,7 +267,7 @@ class VllmServiceTests(SimpleTestCase):
     @patch("api.model_runtime._wait_for_vllm_ready")
     @patch("api.model_runtime._sleep_vllm_model")
     @patch("api.model_runtime._container_running")
-    def test_switch_sleeps_all_running_standby_models(
+    def test_switch_sleeps_only_the_cached_active_model(
         self,
         mock_container_running,
         mock_sleep_vllm_model,
@@ -249,12 +279,45 @@ class VllmServiceTests(SimpleTestCase):
 
         _switch_vllm_model("model-4")
 
-        self.assertEqual(mock_sleep_vllm_model.call_count, 3)
-        mock_sleep_vllm_model.assert_any_call("model-1")
-        mock_sleep_vllm_model.assert_any_call("model-2")
-        mock_sleep_vllm_model.assert_any_call("model-3")
+        mock_sleep_vllm_model.assert_called_once_with("model-1", level=1)
         mock_wake_vllm_model.assert_called_once_with("model-4")
         mock_wait_for_vllm_ready.assert_called_once_with("model-4")
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_SLEEP_MODE_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
+            "model-2": {
+                "service_name": "vllm-model-2",
+                "container_name": "vllm-model-2-dev",
+            },
+        },
+        VLLM_MODELS={
+            "model-1": "http://127.0.0.1:8101/v1",
+            "model-2": "http://127.0.0.1:8102/v1",
+        },
+    )
+    @patch("api.model_runtime._sleep_vllm_model")
+    @patch("api.model_runtime._switch_vllm_model")
+    def test_warmup_vllm_models_switches_each_model_then_sleeps_it(
+        self,
+        mock_switch_vllm_model,
+        mock_sleep_vllm_model,
+    ):
+        cache.set(ACTIVE_VLLM_MODEL_KEY, "model-2", timeout=None)
+
+        warmed_models = warmup_vllm_models(["model-1", "model-2"])
+
+        self.assertEqual(warmed_models, ["model-1", "model-2"])
+        mock_switch_vllm_model.assert_has_calls([call("model-1"), call("model-2")])
+        mock_sleep_vllm_model.assert_has_calls(
+            [call("model-1", level=1), call("model-2", level=1)]
+        )
+        self.assertIsNone(cache.get(ACTIVE_VLLM_MODEL_KEY))
 
     def test_get_available_vllm_models_returns_hardcoded_models(self):
         self.assertEqual(
@@ -434,8 +497,8 @@ class VllmServiceTests(SimpleTestCase):
         self.assertEqual(content, "Hello from vLLM")
         mock_build_client.assert_called_once_with("gpt-oss-20b")
         mock_propagate_attributes.assert_called_once_with(
-            trace_name="vllm-chat-completion",
-            tags=["gptclone", "vllm", "gpt-oss-20b"],
+            trace_name="vllm-gpt-oss-20b",
+            tags=["vllm", "gpt-oss-20b"],
             metadata={
                 "provider": "vllm",
                 "model": "gpt-oss-20b",
@@ -495,8 +558,8 @@ class VllmServiceTests(SimpleTestCase):
         self.assertEqual(content, "Hello from Ollama")
         mock_build_client.assert_called_once_with("qwen3:14b")
         mock_propagate_attributes.assert_called_once_with(
-            trace_name="ollama-chat-completion",
-            tags=["gptclone", "ollama", "qwen3:14b"],
+            trace_name="ollama-qwen3:14b",
+            tags=["ollama", "qwen3:14b"],
             metadata={
                 "provider": "ollama",
                 "model": "qwen3:14b",
@@ -593,8 +656,8 @@ class VllmServiceTests(SimpleTestCase):
             )
 
         mock_propagate_attributes.assert_called_once_with(
-            trace_name="vllm-chat-completion",
-            tags=["gptclone", "vllm", "gpt-oss-20b"],
+            trace_name="vllm-gpt-oss-20b",
+            tags=["vllm", "gpt-oss-20b"],
             metadata={
                 "provider": "vllm",
                 "model": "gpt-oss-20b",

@@ -113,6 +113,8 @@ interface ModelOption {
   thinkingEfforts?: ThinkingEffort[];
 }
 
+type ModelRuntimeState = "awake" | "sleeping" | "waking" | "stopped" | "unavailable";
+
 interface SubscriptionPlanOption {
   id: SubscriptionPlan;
   label: string;
@@ -226,6 +228,60 @@ function normalizeThinkingEffortForModel(
     return "medium";
   }
   return "none";
+}
+
+function getModelRuntimeState(
+  status?: LlmModelStatus,
+  options: { waking?: boolean } = {},
+): ModelRuntimeState | null {
+  if (!status) {
+    return null;
+  }
+  if (!status.available) {
+    return status.managed ? "stopped" : "unavailable";
+  }
+  if (!status.managed) {
+    return null;
+  }
+  if (options.waking && status.sleeping) {
+    return "waking";
+  }
+  if (status.sleeping) {
+    return "sleeping";
+  }
+  if (status.running) {
+    return "awake";
+  }
+  return "stopped";
+}
+
+function getModelRuntimeLabel(state: ModelRuntimeState): string {
+  if (state === "awake") {
+    return "Awake";
+  }
+  if (state === "sleeping") {
+    return "Sleeping";
+  }
+  if (state === "waking") {
+    return "Waking";
+  }
+  if (state === "stopped") {
+    return "Stopped";
+  }
+  return "Unavailable";
+}
+
+function getModelRuntimeBadgeClass(state: ModelRuntimeState, isDark: boolean): string {
+  if (state === "awake") {
+    return isDark ? "bg-[#103f34] text-[#7ee2c8]" : "bg-[#e3f8f1] text-[#08735f]";
+  }
+  if (state === "sleeping") {
+    return isDark ? "bg-[#3a3320] text-[#f2c66d]" : "bg-[#fff3d6] text-[#8a5a00]";
+  }
+  if (state === "waking") {
+    return isDark ? "bg-[#20334a] text-[#8fc7ff]" : "bg-[#e3f0ff] text-[#1d65a8]";
+  }
+  return isDark ? "bg-[#3b2328] text-[#ff9aa8]" : "bg-[#ffe4e8] text-[#b4233a]";
 }
 
 function getThinkingOptions(
@@ -619,6 +675,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   );
   const activeModel = modelOptions.find((model) => model.id === selectedModel) ?? modelOptions[0];
   const activeModelStatus = modelStatuses[selectedModel];
+  const activeModelRuntimeState = getModelRuntimeState(activeModelStatus, { waking: isSending });
   const activeModelThinkingControl = getModelThinkingControl(activeModel, activeModelStatus);
   const activeModelThinkingEfforts = getModelThinkingEfforts(activeModel, activeModelStatus);
   const activeThinkingOptions = getThinkingOptions(activeModelThinkingControl, activeModelThinkingEfforts);
@@ -3486,12 +3543,22 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                     });
                   }}
                   className={cn(
-                    "flex h-10 max-w-[260px] items-center gap-2 rounded-lg px-3 text-lg font-medium transition",
+                    "relative flex h-10 max-w-[300px] items-center gap-2 rounded-lg px-3 pr-16 text-lg font-medium transition",
                     isDark ? "hover:bg-[#2a2a2a]" : "hover:bg-[#f2f2f2]",
                   )}
                 >
                   <span className="truncate">{activeModel.label}</span>
-                  <ChevronDown className="h-4 w-4 shrink-0 opacity-70" />
+                  {activeModelRuntimeState ? (
+                    <span
+                      className={cn(
+                        "absolute right-7 top-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium leading-none",
+                        getModelRuntimeBadgeClass(activeModelRuntimeState, isDark),
+                      )}
+                    >
+                      {getModelRuntimeLabel(activeModelRuntimeState)}
+                    </span>
+                  ) : null}
+                  <ChevronDown className="absolute right-2 h-4 w-4 shrink-0 opacity-70" />
                 </button>
 
                 {isModelMenuOpen ? (
@@ -3504,38 +3571,53 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                         : "border-[#dedede] bg-white text-[#171717]",
                     )}
                   >
-                    {modelOptions.map((model) => (
-                      <button
-                        key={model.id}
-                        type="button"
-                        disabled={!model.enabled}
-                        title={!model.enabled ? model.description : undefined}
-                        onClick={() => {
-                          if (!model.enabled) {
-                            return;
-                          }
-                          setSelectedModel(model.id);
-                          const nextThinkingEfforts = getModelThinkingEfforts(model, modelStatuses[model.id]);
-                          setThinkingEffort((currentEffort) =>
-                            normalizeThinkingEffortForModel(currentEffort, nextThinkingEfforts),
-                          );
-                          setIsModelMenuOpen(false);
-                        }}
-                        className={cn(
-                          "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-start text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
-                          isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
-                        )}
-                      >
-                        <Sparkles className="h-4 w-4 shrink-0" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block font-medium">{model.label}</span>
-                          <span className={cn("block text-xs", isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]")}>
-                            {model.description}
+                    {modelOptions.map((model) => {
+                      const runtimeState = getModelRuntimeState(modelStatuses[model.id]);
+                      return (
+                        <button
+                          key={model.id}
+                          type="button"
+                          disabled={!model.enabled}
+                          title={!model.enabled ? model.description : undefined}
+                          onClick={() => {
+                            if (!model.enabled) {
+                              return;
+                            }
+                            setSelectedModel(model.id);
+                            const nextThinkingEfforts = getModelThinkingEfforts(model, modelStatuses[model.id]);
+                            setThinkingEffort((currentEffort) =>
+                              normalizeThinkingEffortForModel(currentEffort, nextThinkingEfforts),
+                            );
+                            setIsModelMenuOpen(false);
+                          }}
+                          className={cn(
+                            "relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-start text-sm transition disabled:cursor-not-allowed disabled:opacity-50",
+                            isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+                          )}
+                        >
+                          <Sparkles className="h-4 w-4 shrink-0" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block font-medium">{model.label}</span>
+                            <span className={cn("block text-xs", isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]")}>
+                              {model.description}
+                            </span>
                           </span>
-                        </span>
-                        {model.id === selectedModel ? <Check className="h-4 w-4" /> : null}
-                      </button>
-                    ))}
+                          {runtimeState ? (
+                            <span
+                              className={cn(
+                                "absolute right-2 top-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium leading-none",
+                                getModelRuntimeBadgeClass(runtimeState, isDark),
+                              )}
+                            >
+                              {getModelRuntimeLabel(runtimeState)}
+                            </span>
+                          ) : null}
+                          {model.id === selectedModel ? (
+                            <Check className="absolute bottom-2 right-2 h-4 w-4 shrink-0" />
+                          ) : null}
+                        </button>
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>

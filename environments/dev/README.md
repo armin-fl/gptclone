@@ -28,7 +28,8 @@ cd environments/dev
 docker compose up -d
 ```
 
-vLLM model servers, cold-started automatically when selected:
+vLLM model servers, warmed automatically during `docker compose up -d` and then
+put to sleep to free VRAM:
 
 - `gpt-oss-20b`: `http://127.0.0.1:8001/v1`
 - `qwen3-32b-awq`: `http://127.0.0.1:8002/v1`
@@ -66,19 +67,31 @@ override file can still be rendered or used for model-only commands.
 
 The Django backend routes by the request `model` field. For vLLM models it also
 owns a single GPU slot. Before a request, Django waits for other in-flight vLLM
-requests to finish, puts any other running vLLM servers into sleep mode, starts
-the requested container if needed, wakes the requested server, waits for
-`/models`, and then sends the completion. Same-model requests can run
-concurrently on the already-awake server. A model's first use is still a normal
-cold start; after each model has been selected once, all managed vLLM containers
-can stay running with one awake and the inactive models asleep. Later switches
-between already-started sleeping vLLM servers avoid full container restart and
-use vLLM's `/sleep` and `/wake_up` endpoints.
+requests to finish, starts the requested container if needed, wakes the
+requested server, waits for `/models`, and then sends the completion. Same-model
+requests can run concurrently on the already-awake server. Django does not sleep
+a model just because the request finished. It sleeps the current active model
+only when a new request needs a different model, then wakes the requested model.
+The default switch sleep level is `1` for the fastest model-to-model reuse.
+
+The dev Compose override also starts each vLLM container sequentially, waits for
+`/v1/models`, calls `/sleep?level=${GPTCLONE_WARM_SLEEP_LEVEL:-1}`, and only
+then starts the next model.
+
+You can also run the same backend warmup manually:
+
+```bash
+cd backend
+python manage.py warmup_vllm_models
+```
 
 The current GPT-OSS model is loaded from `models/Vllm/OpenAI`. That directory is the
 Hugging Face/vLLM-ready model root with `config.json`, tokenizer files, chat
 template, the safetensors index, and safetensors shards. The nested
 `models/Vllm/OpenAI/original` files are not mounted as the served model path.
+The GPT-OSS Harmony parser also needs the public `o200k_base.tiktoken` vocab.
+The container caches it in `data/tiktoken-rs-cache` via `TIKTOKEN_RS_CACHE_DIR`
+so the file can be pre-seeded and reused across container recreates.
 
 The Qwen3 32B AWQ, QwQ 32B AWQ, and DeepSeek R1 Distill Qwen 32B AWQ vLLM
 models are loaded from `models/Vllm/Qwen3-32B-AWQ`,
@@ -89,17 +102,21 @@ Their vLLM containers use the model context window: `--max-model-len 32768`,
 `--gpu-memory-utilization ${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}`. CPU model offload is explicitly disabled with
 `--cpu-offload-gb 0` and `--offload-group-size 0`; vLLM still uses CPU for
 normal orchestration, tokenization, networking, and process scheduling. vLLM
-services are profile-gated so `docker compose up -d` does not load every model
-into VRAM. The DeepSeek service also uses `--generation-config vllm` so its
+services are started in a dependency chain so `docker compose up -d` warms and
+sleeps one model before loading the next one. They also use `restart: "no"` so
+Docker does not resurrect old model containers and make them compete for the
+same GPU after a crash or daemon restart. The DeepSeek service also uses
+`--generation-config vllm` so its
 local `generation_config.json` does not disable cache behavior, and
 `--reasoning-parser deepseek_r1` so vLLM can expose reasoning metadata in the
 OpenAI-compatible response.
 The GPT-OSS container uses
 `--max-model-len 32768` and
 `--gpu-memory-utilization ${VLLM_GPT_OSS_20B_GPU_MEMORY_UTILIZATION:-0.60}`.
-These defaults leave headroom for sleeping vLLM servers' residual CUDA
-memory. Raising them can improve KV-cache capacity, but can also make model
-switches fail with CUDA OOM while other servers are asleep.
+The default `VLLM_SLEEP_LEVEL=1` keeps switching and same-model reuse as fast as
+possible. Raising GPU memory utilization can improve KV-cache capacity, but can
+also make warmup or model switches fail with CUDA OOM if another server has not
+finished sleeping yet.
 Set `VLLM_32B_MAX_NUM_SEQS` before starting a 32B service to tune same-model
 parallelism. The default is `2`; two full 32k prompts may still exceed KV-cache
 capacity, but smaller concurrent prompts should work. Use `1` if the GPU runs
@@ -130,12 +147,19 @@ services:
   vllm-new-model:
     image: vllm/vllm-openai:v0.19.1
     container_name: vllm-new-model-dev
-    profiles: ["new-model-name"]
-    restart: unless-stopped
+    restart: "no"
     ipc: host
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/vllm-warm-sleep-entrypoint
+    environment:
+      VLLM_SERVER_DEV_MODE: "1"
+      GPTCLONE_WARM_SLEEP_ON_START: "1"
+      GPTCLONE_WARM_SLEEP_LEVEL: "1"
     ports:
       - "127.0.0.1:8010:8000"
     volumes:
+      - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
       - ../../data/huggingface:/root/.cache/huggingface
     command:
       - --model
@@ -195,7 +219,7 @@ docker compose up -d --force-recreate vllm-new-model
 ```
 
 You can choose any enabled backend model from the chat UI model selector.
-Managed stopped vLLM containers remain selectable and start automatically.
+Managed sleeping vLLM containers remain selectable and wake automatically.
 Backend chat completions request the maximum remaining context for each model,
 capped by `LLM_MAX_COMPLETION_TOKENS`, which defaults to `32768`.
 

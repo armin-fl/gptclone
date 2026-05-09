@@ -275,8 +275,8 @@ def _build_trace_context(
         if value is not None
     }
     trace_context = {
-        "trace_name": f"{provider}-chat-completion",
-        "tags": ["gptclone", provider, model],
+        "trace_name": f"{provider}-{model}",
+        "tags": [provider, model],
         "metadata": trace_metadata,
     }
     if langfuse_session_id:

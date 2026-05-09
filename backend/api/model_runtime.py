@@ -357,7 +357,7 @@ def _post_vllm_runtime_endpoint(model: str, endpoint: str, *, params: dict | Non
         ) from exc
 
 
-def _sleep_vllm_model(model: str) -> None:
+def _sleep_vllm_model(model: str, *, level: int | None = None) -> None:
     if not vllm_sleep_mode_enabled():
         config = get_vllm_container_config(model)
         if config is not None:
@@ -380,7 +380,11 @@ def _sleep_vllm_model(model: str) -> None:
     _post_vllm_runtime_endpoint(
         model,
         "sleep",
-        params={"level": int(getattr(settings, "VLLM_SLEEP_LEVEL", 1))},
+        params={
+            "level": int(
+                level if level is not None else getattr(settings, "VLLM_SLEEP_LEVEL", 1)
+            )
+        },
     )
 
 
@@ -412,6 +416,54 @@ def ensure_vllm_model_ready(model: str) -> None:
     _switch_vllm_model(model)
 
 
+def warmup_vllm_model(model: str, *, sleep_after: bool = True) -> None:
+    if not vllm_auto_switch_enabled():
+        raise VllmRuntimeError("vLLM auto-switching is disabled.")
+    if not is_managed_vllm_model(model):
+        raise VllmRuntimeError(f"Unsupported managed vLLM model '{model}'.")
+
+    _switch_vllm_model(model)
+    if sleep_after:
+        _sleep_vllm_model(
+            model,
+            level=int(getattr(settings, "VLLM_WARMUP_SLEEP_LEVEL", 1)),
+        )
+
+
+def warmup_vllm_models(
+    models: list[str] | tuple[str, ...] | None = None,
+    *,
+    sleep_after: bool = True,
+) -> list[str]:
+    selected_models = list(models) if models is not None else _managed_vllm_models()
+
+    unknown_models = [
+        model
+        for model in selected_models
+        if not is_managed_vllm_model(model)
+    ]
+    if unknown_models:
+        raise VllmRuntimeError(
+            "Unsupported managed vLLM model(s): " + ", ".join(unknown_models)
+        )
+
+    with _CacheLock(
+        GPU_SLOT_LOCK_KEY,
+        wait_timeout=float(getattr(settings, "VLLM_GPU_LOCK_WAIT_TIMEOUT_SECONDS", 900)),
+        ttl=int(getattr(settings, "VLLM_GPU_LOCK_TTL_SECONDS", 7200)),
+        poll_seconds=float(getattr(settings, "VLLM_RUNTIME_POLL_SECONDS", 1.0)),
+    ):
+        warmed_models = []
+        for model in selected_models:
+            warmup_vllm_model(model, sleep_after=sleep_after)
+            warmed_models.append(model)
+
+    if sleep_after:
+        cache.delete(ACTIVE_VLLM_MODEL_KEY)
+    _clear_model_status_cache()
+    return warmed_models
+
+
 def _switch_vllm_model(model: str) -> None:
     requested_config = get_vllm_container_config(model)
     if requested_config is None:
@@ -419,13 +471,14 @@ def _switch_vllm_model(model: str) -> None:
 
     _wait_for_other_inflight_requests(model)
 
-    for other_model in _managed_vllm_models():
-        if other_model == model:
-            continue
-        other_config = get_vllm_container_config(other_model)
-        if other_config is None or not _container_running(other_config.container_name):
-            continue
-        _sleep_vllm_model(other_model)
+    active_model = cache.get(ACTIVE_VLLM_MODEL_KEY)
+    if active_model and active_model != model and is_managed_vllm_model(active_model):
+        active_config = get_vllm_container_config(active_model)
+        if active_config is not None and _container_running(active_config.container_name):
+            _sleep_vllm_model(
+                active_model,
+                level=int(getattr(settings, "VLLM_SWITCH_SLEEP_LEVEL", 1)),
+            )
 
     was_running = _container_running(requested_config.container_name)
     if not was_running:
