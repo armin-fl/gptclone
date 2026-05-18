@@ -16,11 +16,18 @@ from accounts.models import User
 from api.models import Conversation, Message
 from .model_runtime import (
     ACTIVE_VLLM_MODEL_KEY,
+    VllmRuntimeError,
+    get_image_container_config,
     get_vllm_container_config,
     _inflight_cache_key,
     _inflight_count,
+    _sleep_image_model,
+    _switch_image_model,
     _switch_vllm_model,
+    _wake_image_model,
+    _wake_vllm_model,
     is_managed_vllm_model,
+    managed_image_model,
     managed_vllm_model,
     warmup_vllm_models,
 )
@@ -107,6 +114,7 @@ class VllmServiceTests(SimpleTestCase):
                 "container_name": "vllm-model-1-dev",
             },
         },
+        IMAGE_MODEL_CONTAINERS={},
     )
     @patch("api.model_runtime._switch_vllm_model")
     @patch("api.model_runtime._container_running")
@@ -136,6 +144,7 @@ class VllmServiceTests(SimpleTestCase):
                 "container_name": "vllm-model-1-dev",
             },
         },
+        IMAGE_MODEL_CONTAINERS={},
     )
     @patch("api.model_runtime._switch_vllm_model")
     @patch("api.model_runtime.is_vllm_model_sleeping")
@@ -165,6 +174,7 @@ class VllmServiceTests(SimpleTestCase):
                 "container_name": "vllm-model-1-dev",
             },
         },
+        IMAGE_MODEL_CONTAINERS={},
     )
     @patch("api.model_runtime._sleep_vllm_model")
     @patch("api.model_runtime.is_vllm_model_sleeping")
@@ -201,6 +211,7 @@ class VllmServiceTests(SimpleTestCase):
             "model-1": "http://127.0.0.1:8101/v1",
             "model-2": "http://127.0.0.1:8102/v1",
         },
+        IMAGE_MODEL_CONTAINERS={},
         VLLM_INFLIGHT_DRAIN_TIMEOUT_SECONDS=5,
         VLLM_RUNTIME_POLL_SECONDS=0.01,
     )
@@ -262,6 +273,7 @@ class VllmServiceTests(SimpleTestCase):
             "model-3": "http://127.0.0.1:8103/v1",
             "model-4": "http://127.0.0.1:8104/v1",
         },
+        IMAGE_MODEL_CONTAINERS={},
     )
     @patch("api.model_runtime._wake_vllm_model")
     @patch("api.model_runtime._wait_for_vllm_ready")
@@ -291,6 +303,225 @@ class VllmServiceTests(SimpleTestCase):
                 "service_name": "vllm-model-1",
                 "container_name": "vllm-model-1-dev",
             },
+        },
+        VLLM_MODELS={"model-1": "http://127.0.0.1:8101/v1"},
+        IMAGE_MODEL_CONTAINERS={
+            "flux": {
+                "service_name": "vllm-flux",
+                "container_name": "vllm-flux-dev",
+            },
+        },
+    )
+    @patch("api.model_runtime._sleep_running_image_model_containers")
+    @patch("api.model_runtime._wake_vllm_model")
+    @patch("api.model_runtime._wait_for_vllm_ready")
+    @patch("api.model_runtime._container_running")
+    def test_switch_sleeps_image_container_before_waking_text_model(
+        self,
+        mock_container_running,
+        mock_wait_for_vllm_ready,
+        mock_wake_vllm_model,
+        mock_sleep_running_image_model_containers,
+    ):
+        mock_container_running.return_value = True
+
+        _switch_vllm_model("model-1")
+
+        mock_sleep_running_image_model_containers.assert_called_once_with()
+        mock_wait_for_vllm_ready.assert_called_once_with("model-1")
+        mock_wake_vllm_model.assert_called_once_with("model-1")
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_SLEEP_MODE_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
+        },
+        VLLM_MODELS={"model-1": "http://127.0.0.1:8101/v1"},
+        IMAGE_SLEEP_MODE_ENABLED=True,
+        IMAGE_MODEL_CONTAINERS={
+            "flux": {
+                "service_name": "vllm-flux",
+                "container_name": "vllm-flux-dev",
+            },
+        },
+        IMAGE_MODELS={
+            "flux": {
+                "provider": "vllm-omni",
+                "base_url": "http://127.0.0.1:8105/v1",
+                "label": "Flux",
+            },
+        },
+    )
+    @patch("api.model_runtime._wake_image_model")
+    @patch("api.model_runtime._wait_for_image_model_ready")
+    @patch("api.model_runtime._start_container")
+    @patch("api.model_runtime._sleep_vllm_model")
+    @patch("api.model_runtime._container_running")
+    def test_switch_image_model_sleeps_text_containers_before_starting_flux(
+        self,
+        mock_container_running,
+        mock_sleep_vllm_model,
+        mock_start_container,
+        mock_wait_for_image_model_ready,
+        mock_wake_image_model,
+    ):
+        running_containers = {
+            "vllm-model-1-dev": True,
+            "vllm-flux-dev": False,
+        }
+        mock_container_running.side_effect = lambda container_name: running_containers.get(
+            container_name,
+            False,
+        )
+
+        def mark_started(config):
+            running_containers[config.container_name] = True
+
+        mock_start_container.side_effect = mark_started
+
+        _switch_image_model("flux")
+
+        mock_sleep_vllm_model.assert_called_once_with("model-1", level=1)
+        mock_start_container.assert_called_once()
+        mock_wake_image_model.assert_called_once_with("flux")
+        mock_wait_for_image_model_ready.assert_called_once_with("flux")
+
+    @override_settings(
+        IMAGE_SLEEP_MODE_ENABLED=True,
+        IMAGE_SLEEP_LEVEL=1,
+        IMAGE_SLEEP_FALLBACK_STOP_ENABLED=False,
+        IMAGE_MODEL_CONTAINERS={
+            "flux": {
+                "service_name": "vllm-flux",
+                "container_name": "vllm-flux-dev",
+            },
+        },
+        IMAGE_MODELS={
+            "flux": {
+                "provider": "vllm-omni",
+                "base_url": "http://127.0.0.1:8105/v1",
+                "label": "Flux",
+            },
+        },
+        IMAGE_MODEL_SLEEP_STAGE_IDS={"flux": [0]},
+    )
+    @patch("api.model_runtime.requests.post")
+    @patch("api.model_runtime._container_running")
+    def test_sleep_image_model_uses_omni_sleep_endpoint(
+        self,
+        mock_container_running,
+        mock_post,
+    ):
+        mock_container_running.return_value = True
+        mock_post.return_value = _FakeRuntimeResponse()
+
+        _sleep_image_model("flux")
+
+        mock_post.assert_has_calls(
+            [
+                call(
+                    "http://127.0.0.1:8105/v1/omni/wakeup",
+                    headers={},
+                    json={"stage_ids": [0]},
+                    timeout=settings.VLLM_SLEEP_ENDPOINT_TIMEOUT_SECONDS,
+                ),
+                call(
+                    "http://127.0.0.1:8105/v1/omni/sleep",
+                    headers={},
+                    json={"stage_ids": [0], "level": 1},
+                    timeout=settings.VLLM_SLEEP_ENDPOINT_TIMEOUT_SECONDS,
+                ),
+            ]
+        )
+        self.assertTrue(cache.get("image:omni-sleeping:flux"))
+
+    @override_settings(
+        IMAGE_SLEEP_MODE_ENABLED=True,
+        IMAGE_MODEL_CONTAINERS={
+            "flux": {
+                "service_name": "vllm-flux",
+                "container_name": "vllm-flux-dev",
+            },
+        },
+        IMAGE_MODELS={
+            "flux": {
+                "provider": "vllm-omni",
+                "base_url": "http://127.0.0.1:8105/v1",
+                "label": "Flux",
+            },
+        },
+        IMAGE_MODEL_SLEEP_STAGE_IDS={"flux": [0]},
+    )
+    @patch("api.model_runtime.requests.post")
+    @patch("api.model_runtime._container_running")
+    def test_wake_image_model_uses_omni_wakeup_endpoint(
+        self,
+        mock_container_running,
+        mock_post,
+    ):
+        mock_container_running.return_value = True
+        mock_post.return_value = _FakeRuntimeResponse()
+
+        _wake_image_model("flux")
+
+        mock_post.assert_called_once_with(
+            "http://127.0.0.1:8105/v1/omni/wakeup",
+            headers={},
+            json={"stage_ids": [0]},
+            timeout=settings.VLLM_SLEEP_ENDPOINT_TIMEOUT_SECONDS,
+        )
+        self.assertIsNone(cache.get("image:omni-sleeping:flux"))
+
+    @override_settings(
+        VLLM_SLEEP_MODE_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
+        },
+        VLLM_MODELS={"model-1": "http://127.0.0.1:8101/v1"},
+    )
+    @patch("api.model_runtime._wait_for_vllm_ready")
+    @patch("api.model_runtime._restart_container")
+    @patch("api.model_runtime._post_vllm_runtime_endpoint")
+    @patch("api.model_runtime.is_vllm_model_sleeping")
+    @patch("api.model_runtime._container_running")
+    def test_wake_recreates_container_once_after_failed_wake(
+        self,
+        mock_container_running,
+        mock_is_vllm_model_sleeping,
+        mock_post_vllm_runtime_endpoint,
+        mock_restart_container,
+        mock_wait_for_vllm_ready,
+    ):
+        mock_container_running.return_value = True
+        mock_is_vllm_model_sleeping.side_effect = [True, True]
+        mock_post_vllm_runtime_endpoint.side_effect = [
+            VllmRuntimeError("wake failed"),
+            None,
+        ]
+
+        _wake_vllm_model("model-1")
+
+        mock_restart_container.assert_called_once()
+        mock_wait_for_vllm_ready.assert_called_once_with("model-1")
+        mock_post_vllm_runtime_endpoint.assert_has_calls(
+            [call("model-1", "wake_up"), call("model-1", "wake_up")]
+        )
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_SLEEP_MODE_ENABLED=True,
+        VLLM_MODEL_CONTAINERS={
+            "model-1": {
+                "service_name": "vllm-model-1",
+                "container_name": "vllm-model-1-dev",
+            },
             "model-2": {
                 "service_name": "vllm-model-2",
                 "container_name": "vllm-model-2-dev",
@@ -300,6 +531,7 @@ class VllmServiceTests(SimpleTestCase):
             "model-1": "http://127.0.0.1:8101/v1",
             "model-2": "http://127.0.0.1:8102/v1",
         },
+        IMAGE_MODEL_CONTAINERS={},
     )
     @patch("api.model_runtime._sleep_vllm_model")
     @patch("api.model_runtime._switch_vllm_model")
@@ -802,6 +1034,13 @@ class _FakeModelListResponse:
             "object": "list",
             "data": [{"id": model_id, "object": "model"} for model_id in self.model_ids],
         }
+
+
+class _FakeRuntimeResponse:
+    text = ""
+
+    def raise_for_status(self):
+        return None
 
 
 class ConversationAuthorizationTests(TestCase):

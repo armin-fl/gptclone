@@ -112,3 +112,34 @@ class RegenerateMessageSerializer(serializers.Serializer):
 
 class EditMessageSerializer(SendMessageSerializer):
     pass
+
+
+class ImageGenerationSerializer(serializers.Serializer):
+    prompt = serializers.CharField()
+    model = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    n = serializers.IntegerField(min_value=1, max_value=4, required=False, default=1)
+    size = serializers.RegexField(
+        regex=r"^[0-9]{2,5}x[0-9]{2,5}$",
+        required=False,
+        default="1024x1024",
+        error_messages={"invalid": "Size must use WIDTHxHEIGHT format, such as 1024x1024."},
+    )
+    negative_prompt = serializers.CharField(required=False, allow_blank=True)
+    num_inference_steps = serializers.IntegerField(min_value=1, max_value=150, required=False)
+    guidance_scale = serializers.FloatField(min_value=0.0, max_value=20.0, required=False)
+    true_cfg_scale = serializers.FloatField(min_value=0.0, max_value=20.0, required=False)
+    seed = serializers.IntegerField(min_value=0, required=False)
+
+    def validate_prompt(self, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise serializers.ValidationError("Prompt cannot be empty.")
+        return clean
+
+    def validate_size(self, value: str) -> str:
+        width, height = [int(part) for part in value.lower().split("x", 1)]
+        if width < 256 or height < 256 or width > 2048 or height > 2048:
+            raise serializers.ValidationError("Size dimensions must be between 256 and 2048 pixels.")
+        if width % 8 != 0 or height % 8 != 0:
+            raise serializers.ValidationError("Size dimensions must be divisible by 8.")
+        return f"{width}x{height}"

@@ -53,6 +53,27 @@ export interface LlmModelsResponse {
   models: LlmModelStatus[];
 }
 
+export interface ImageModelStatus {
+  id: string;
+  label: string;
+  provider: string;
+  available: boolean;
+  reason?: string;
+}
+
+export interface ImageModelsResponse {
+  models: ImageModelStatus[];
+}
+
+export interface ImageGenerationResponse {
+  created?: number;
+  data: Array<{
+    b64_json?: string;
+    url?: string | null;
+    revised_prompt?: string | null;
+  }>;
+}
+
 export interface InitialChatData {
   user: AuthUser | null;
   conversations: ConversationPage;

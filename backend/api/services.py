@@ -10,8 +10,10 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAIEr
 from requests import RequestException
 
 from .model_runtime import (
+    is_managed_image_model,
     is_managed_vllm_model,
     is_vllm_model_sleeping,
+    managed_image_model,
     managed_vllm_model,
     vllm_auto_switch_enabled,
     vllm_sleep_mode_enabled,
@@ -23,6 +25,10 @@ class UnsupportedLlmModelError(RuntimeError):
 
 
 class UnsupportedVllmModelError(RuntimeError):
+    pass
+
+
+class UnsupportedImageModelError(RuntimeError):
     pass
 
 
@@ -222,6 +228,142 @@ def get_llm_model_statuses() -> list[dict]:
     with ThreadPoolExecutor(max_workers=min(len(models), 8)) as executor:
         statuses_by_model = dict(zip(models, executor.map(get_llm_model_status, models)))
     return [statuses_by_model[model] for model in models]
+
+
+def get_available_image_models() -> list[str]:
+    return list(getattr(settings, "IMAGE_MODELS", {}).keys())
+
+
+def get_image_model_config(model: str) -> dict:
+    try:
+        return settings.IMAGE_MODELS[model]
+    except KeyError as exc:
+        available_models = ", ".join(get_available_image_models())
+        raise UnsupportedImageModelError(
+            f"Unsupported image model '{model}'. Available models: {available_models}."
+        ) from exc
+
+
+def _image_model_status_cache_key(model: str) -> str:
+    return f"image:model-status:{model}"
+
+
+def get_image_model_status(model: str) -> dict:
+    cached = cache.get(_image_model_status_cache_key(model))
+    if cached is not None:
+        return cached
+
+    provider = ""
+    is_available = False
+    server_reachable = False
+    reason = ""
+    try:
+        config = get_image_model_config(model)
+        provider = str(config.get("provider", ""))
+        base_url = str(config["base_url"]).rstrip("/")
+        headers = (
+            {"Authorization": f"Bearer {settings.IMAGE_API_KEY}"}
+            if settings.IMAGE_API_KEY
+            else {}
+        )
+        response = requests.get(
+            f"{base_url}/models",
+            headers=headers,
+            timeout=settings.LLM_MODEL_HEALTH_TIMEOUT_SECONDS,
+        )
+        server_reachable = True
+        response.raise_for_status()
+        is_available = True
+    except (UnsupportedImageModelError, KeyError, RequestException) as exc:
+        reason = str(exc)
+
+    is_managed = is_managed_image_model(model)
+    if not is_available and not server_reachable and is_managed and vllm_auto_switch_enabled():
+        is_available = True
+        reason = "Image model container is stopped. It will start automatically on first request."
+
+    status = {
+        "id": model,
+        "label": str(settings.IMAGE_MODELS.get(model, {}).get("label", model)),
+        "provider": provider or str(settings.IMAGE_MODELS.get(model, {}).get("provider", "")),
+        "managed": is_managed,
+        "running": server_reachable,
+        "available": is_available,
+        "reason": reason,
+    }
+    cache.set(_image_model_status_cache_key(model), status, settings.LLM_MODEL_HEALTH_CACHE_SECONDS)
+    return status
+
+
+def get_image_model_statuses() -> list[dict]:
+    models = get_available_image_models()
+    if not models:
+        return []
+
+    with ThreadPoolExecutor(max_workers=min(len(models), 4)) as executor:
+        statuses_by_model = dict(zip(models, executor.map(get_image_model_status, models)))
+    return [statuses_by_model[model] for model in models]
+
+
+def request_image_generation(
+    *,
+    model: str,
+    prompt: str,
+    n: int = 1,
+    size: str = "1024x1024",
+    negative_prompt: str = "",
+    num_inference_steps: int | None = None,
+    guidance_scale: float | None = None,
+    true_cfg_scale: float | None = None,
+    seed: int | None = None,
+    user_id: str | None = None,
+) -> dict:
+    config = get_image_model_config(model)
+    base_url = str(config["base_url"]).rstrip("/")
+    headers = {"Content-Type": "application/json"}
+    if settings.IMAGE_API_KEY:
+        headers["Authorization"] = f"Bearer {settings.IMAGE_API_KEY}"
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "n": n,
+        "size": size,
+        "response_format": "b64_json",
+    }
+    optional_fields = {
+        "negative_prompt": negative_prompt.strip() if negative_prompt else "",
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "true_cfg_scale": true_cfg_scale,
+        "seed": seed,
+        "user": user_id,
+    }
+    payload.update({key: value for key, value in optional_fields.items() if value not in ("", None)})
+
+    endpoint = f"{base_url}/images/generations"
+    try:
+        with managed_image_model(model):
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=settings.IMAGE_GENERATION_TIMEOUT_SECONDS,
+            )
+        response.raise_for_status()
+    except RequestException as exc:
+        details = getattr(getattr(exc, "response", None), "text", "") or str(exc)
+        raise RuntimeError(f"Image generation failed at {endpoint}: {details}") from exc
+
+    try:
+        output = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Image generation returned a non-JSON response.") from exc
+
+    data = output.get("data")
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("Image generation returned no images.")
+    return output
 
 
 def get_available_vllm_models() -> list[str]:

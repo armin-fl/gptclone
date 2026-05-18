@@ -213,6 +213,38 @@ VLLM_RUNTIME_POLL_SECONDS = float(os.environ.get("VLLM_RUNTIME_POLL_SECONDS", "1
 LLM_MODEL_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("LLM_MODEL_HEALTH_TIMEOUT_SECONDS", "0.8"))
 LLM_MODEL_HEALTH_CACHE_SECONDS = int(os.environ.get("LLM_MODEL_HEALTH_CACHE_SECONDS", "5"))
 
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL", "flux")
+IMAGE_API_KEY = os.environ.get("IMAGE_API_KEY", "")
+IMAGE_GENERATION_TIMEOUT_SECONDS = float(os.environ.get("IMAGE_GENERATION_TIMEOUT_SECONDS", "900"))
+IMAGE_SLEEP_MODE_ENABLED = env_bool(
+    "IMAGE_SLEEP_MODE_ENABLED",
+    "1" if VLLM_SLEEP_MODE_ENABLED else "0",
+)
+IMAGE_SLEEP_LEVEL = int(os.environ.get("IMAGE_SLEEP_LEVEL", str(VLLM_SLEEP_LEVEL)))
+IMAGE_SWITCH_SLEEP_LEVEL = int(os.environ.get("IMAGE_SWITCH_SLEEP_LEVEL", str(IMAGE_SLEEP_LEVEL)))
+IMAGE_SLEEP_FALLBACK_STOP_ENABLED = env_bool("IMAGE_SLEEP_FALLBACK_STOP_ENABLED", "0")
+FLUX_SLEEP_STAGE_IDS = [
+    int(stage_id.strip())
+    for stage_id in os.environ.get("FLUX_SLEEP_STAGE_IDS", "0").split(",")
+    if stage_id.strip()
+]
+IMAGE_MODELS = {
+    "flux": {
+        "provider": "vllm-omni",
+        "base_url": os.environ.get("FLUX_BASE_URL", "http://127.0.0.1:8005/v1"),
+        "label": "FLUX.2 Klein 4B",
+    },
+}
+IMAGE_MODEL_CONTAINERS = {
+    "flux": {
+        "service_name": "vllm-flux",
+        "container_name": "vllm-flux-dev",
+    },
+}
+IMAGE_MODEL_SLEEP_STAGE_IDS = {
+    "flux": FLUX_SLEEP_STAGE_IDS or [0],
+}
+
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:14b")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")

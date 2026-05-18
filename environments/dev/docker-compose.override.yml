@@ -41,6 +41,52 @@ services:
   #             count: all
   #             capabilities: [gpu]
 
+  vllm-flux:
+    build:
+      context: ./vllm-omni
+    image: vllm-omni:gptclone-v0.20.0
+    container_name: vllm-flux-dev
+    profiles: ["flux"]
+    restart: "no"
+    ipc: host
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/vllm-warm-sleep-entrypoint
+    environment:
+      <<: *vllm-warm-sleep-env
+      HF_HOME: /root/.cache/huggingface
+      GPTCLONE_WARM_SLEEP_API: omni
+      GPTCLONE_OMNI_SLEEP_STAGE_IDS: "${FLUX_SLEEP_STAGE_IDS:-0}"
+      GPTCLONE_PATCH_OMNI_SLEEP_STATE: "1"
+    ports:
+      - "127.0.0.1:8005:8000"
+    volumes:
+      - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
+      - ../../data/huggingface:/root/.cache/huggingface
+      - ${FLUX_MODEL_PATH:-../../models/Vllm/FLUX.2-klein-base-4B}:/models/flux:ro
+    command:
+      - /models/flux
+      - --omni
+      - --served-model-name
+      - flux
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --dtype
+      - auto
+      - --gpu-memory-utilization
+      - "${VLLM_FLUX_GPU_MEMORY_UTILIZATION:-0.80}"
+      - --enable-sleep-mode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck: *vllm-warm-sleep-healthcheck
+
   vllm-gpt-oss-20b:
     image: vllm:gptclone
     container_name: vllm-gpt-oss-20b-dev
@@ -141,116 +187,116 @@ services:
               capabilities: [gpu]
     healthcheck: *vllm-warm-sleep-healthcheck
 
-  vllm-qwq-32b-awq:
-    image: vllm:gptclone
-    container_name: vllm-qwq-32b-awq-dev
-    restart: "no"
-    ipc: host
-    depends_on:
-      vllm-qwen3-32b-awq:
-        condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - /usr/local/bin/vllm-warm-sleep-entrypoint
-    environment:
-      <<: *vllm-warm-sleep-env
-      VLLM_SERVER_DEV_MODE: "1"
-      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
-      OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
-      OTEL_SERVICE_NAME: vllm-qwq-32b-awq
-    ports:
-      - "127.0.0.1:8003:8000"
-    volumes:
-      - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
-      - ../../data/huggingface:/root/.cache/huggingface
-      - ../../models/Vllm/QwQ-32B-AWQ:/models/qwq-32b-awq:ro
-    command:
-      - --model
-      - /models/qwq-32b-awq
-      - --served-model-name
-      - qwq-32b-awq
-      - --dtype
-      - auto
-      - --cpu-offload-gb
-      - "0"
-      - --offload-group-size
-      - "0"
-      - --gpu-memory-utilization
-      - "${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}"
-      - --max-model-len
-      - "32768"
-      - --kv-cache-dtype
-      - fp8
-      - --max-num-seqs
-      - "${VLLM_32B_MAX_NUM_SEQS:-2}"
-      - --enforce-eager
-      - --enable-sleep-mode
-      - --otlp-traces-endpoint
-      - http://langfuse-web:3000/api/public/otel/v1/traces
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck: *vllm-warm-sleep-healthcheck
+  # vllm-qwq-32b-awq:
+  #   image: vllm:gptclone
+  #   container_name: vllm-qwq-32b-awq-dev
+  #   restart: "no"
+  #   ipc: host
+  #   depends_on:
+  #     vllm-qwen3-32b-awq:
+  #       condition: service_healthy
+  #   entrypoint:
+  #     - /bin/sh
+  #     - /usr/local/bin/vllm-warm-sleep-entrypoint
+  #   environment:
+  #     <<: *vllm-warm-sleep-env
+  #     VLLM_SERVER_DEV_MODE: "1"
+  #     OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+  #     OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+  #     OTEL_SERVICE_NAME: vllm-qwq-32b-awq
+  #   ports:
+  #     - "127.0.0.1:8003:8000"
+  #   volumes:
+  #     - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
+  #     - ../../data/huggingface:/root/.cache/huggingface
+  #     - ../../models/Vllm/QwQ-32B-AWQ:/models/qwq-32b-awq:ro
+  #   command:
+  #     - --model
+  #     - /models/qwq-32b-awq
+  #     - --served-model-name
+  #     - qwq-32b-awq
+  #     - --dtype
+  #     - auto
+  #     - --cpu-offload-gb
+  #     - "0"
+  #     - --offload-group-size
+  #     - "0"
+  #     - --gpu-memory-utilization
+  #     - "${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}"
+  #     - --max-model-len
+  #     - "32768"
+  #     - --kv-cache-dtype
+  #     - fp8
+  #     - --max-num-seqs
+  #     - "${VLLM_32B_MAX_NUM_SEQS:-2}"
+  #     - --enforce-eager
+  #     - --enable-sleep-mode
+  #     - --otlp-traces-endpoint
+  #     - http://langfuse-web:3000/api/public/otel/v1/traces
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   healthcheck: *vllm-warm-sleep-healthcheck
 
-  vllm-deepseek-r1-distill-qwen-32b-awq:
-    image: vllm:gptclone
-    container_name: vllm-deepseek-r1-distill-qwen-32b-awq-dev
-    restart: "no"
-    ipc: host
-    depends_on:
-      vllm-qwq-32b-awq:
-        condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - /usr/local/bin/vllm-warm-sleep-entrypoint
-    environment:
-      <<: *vllm-warm-sleep-env
-      VLLM_SERVER_DEV_MODE: "1"
-      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
-      OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
-      OTEL_SERVICE_NAME: vllm-deepseek-r1-distill-qwen-32b-awq
-    ports:
-      - "127.0.0.1:8004:8000"
-    volumes:
-      - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
-      - ../../data/huggingface:/root/.cache/huggingface
-      - ../../models/Vllm/deepseek-r1-distill-qwen-32b-awq:/models/deepseek-r1-distill-qwen-32b-awq:ro
-    command:
-      - --model
-      - /models/deepseek-r1-distill-qwen-32b-awq
-      - --served-model-name
-      - deepseek-r1-distill-qwen-32b-awq
-      - --dtype
-      - auto
-      - --cpu-offload-gb
-      - "0"
-      - --offload-group-size
-      - "0"
-      - --gpu-memory-utilization
-      - "${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}"
-      - --max-model-len
-      - "32768"
-      - --kv-cache-dtype
-      - fp8
-      - --max-num-seqs
-      - "${VLLM_32B_MAX_NUM_SEQS:-2}"
-      - --enforce-eager
-      - --generation-config
-      - vllm
-      - --reasoning-parser
-      - deepseek_r1
-      - --enable-sleep-mode
-      - --otlp-traces-endpoint
-      - http://langfuse-web:3000/api/public/otel/v1/traces
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck: *vllm-warm-sleep-healthcheck
+  # vllm-deepseek-r1-distill-qwen-32b-awq:
+  #   image: vllm:gptclone
+  #   container_name: vllm-deepseek-r1-distill-qwen-32b-awq-dev
+  #   restart: "no"
+  #   ipc: host
+  #   depends_on:
+  #     vllm-qwq-32b-awq:
+  #       condition: service_healthy
+  #   entrypoint:
+  #     - /bin/sh
+  #     - /usr/local/bin/vllm-warm-sleep-entrypoint
+  #   environment:
+  #     <<: *vllm-warm-sleep-env
+  #     VLLM_SERVER_DEV_MODE: "1"
+  #     OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+  #     OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+  #     OTEL_SERVICE_NAME: vllm-deepseek-r1-distill-qwen-32b-awq
+  #   ports:
+  #     - "127.0.0.1:8004:8000"
+  #   volumes:
+  #     - ./vllm/warm-sleep-entrypoint.sh:/usr/local/bin/vllm-warm-sleep-entrypoint:ro
+  #     - ../../data/huggingface:/root/.cache/huggingface
+  #     - ../../models/Vllm/deepseek-r1-distill-qwen-32b-awq:/models/deepseek-r1-distill-qwen-32b-awq:ro
+  #   command:
+  #     - --model
+  #     - /models/deepseek-r1-distill-qwen-32b-awq
+  #     - --served-model-name
+  #     - deepseek-r1-distill-qwen-32b-awq
+  #     - --dtype
+  #     - auto
+  #     - --cpu-offload-gb
+  #     - "0"
+  #     - --offload-group-size
+  #     - "0"
+  #     - --gpu-memory-utilization
+  #     - "${VLLM_32B_GPU_MEMORY_UTILIZATION:-0.66}"
+  #     - --max-model-len
+  #     - "32768"
+  #     - --kv-cache-dtype
+  #     - fp8
+  #     - --max-num-seqs
+  #     - "${VLLM_32B_MAX_NUM_SEQS:-2}"
+  #     - --enforce-eager
+  #     - --generation-config
+  #     - vllm
+  #     - --reasoning-parser
+  #     - deepseek_r1
+  #     - --enable-sleep-mode
+  #     - --otlp-traces-endpoint
+  #     - http://langfuse-web:3000/api/public/otel/v1/traces
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   healthcheck: *vllm-warm-sleep-healthcheck

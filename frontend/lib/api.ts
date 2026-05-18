@@ -5,6 +5,8 @@ import type {
   ChatStreamEvent,
   ConversationPage,
   ConversationDetail,
+  ImageGenerationResponse,
+  ImageModelsResponse,
   InitialChatData,
   LlmModelsResponse,
   OTPRequestResponse,
@@ -187,6 +189,27 @@ export function listConversations(
 
 export function listModels() {
   return request<LlmModelsResponse>("/api/models");
+}
+
+export function listImageModels() {
+  return request<ImageModelsResponse>("/api/image-models");
+}
+
+export function generateImage(payload: {
+  prompt: string;
+  model?: string;
+  n?: number;
+  size?: string;
+  negative_prompt?: string;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+  true_cfg_scale?: number;
+  seed?: number;
+}) {
+  return request<ImageGenerationResponse>("/api/image-generations", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getConversation(

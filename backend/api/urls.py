@@ -7,11 +7,15 @@ from .views import (
     ConversationListCreateView,
     ConversationRegenerateMessageView,
     ConversationSendMessageView,
+    ImageGenerationView,
+    ImageModelListView,
     LlmModelListView,
 )
 
 urlpatterns = [
     path("models/", LlmModelListView.as_view(), name="llm-model-list"),
+    path("image-models/", ImageModelListView.as_view(), name="image-model-list"),
+    path("images/generations/", ImageGenerationView.as_view(), name="image-generation"),
     path("conversations/", ConversationListCreateView.as_view(), name="conversation-list-create"),
     path("conversations/<uuid:conversation_id>/", ConversationDetailView.as_view(), name="conversation-detail"),
     path(

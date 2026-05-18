@@ -36,6 +36,18 @@ put to sleep to free VRAM:
 - `qwq-32b-awq`: `http://127.0.0.1:8003/v1`
 - `deepseek-r1-distill-qwen-32b-awq`: `http://127.0.0.1:8004/v1`
 
+Flux image generation is served separately through vLLM-Omni and is opt-in so it
+does not consume GPU memory during normal chat startup:
+
+- `flux`: `http://127.0.0.1:8005/v1`
+
+Start it when you want image generation:
+
+```bash
+cd environments/dev
+docker compose --profile flux up -d --build vllm-flux
+```
+
 Ollama model servers:
 
 - `qwen3:14b`: `http://127.0.0.1:11434/v1`
@@ -75,8 +87,16 @@ only when a new request needs a different model, then wakes the requested model.
 The default switch sleep level is `1` for the fastest model-to-model reuse.
 
 The dev Compose override also starts each vLLM container sequentially, waits for
-`/v1/models`, calls `/sleep?level=${GPTCLONE_WARM_SLEEP_LEVEL:-1}`, and only
-then starts the next model.
+`/v1/models`, calls the configured sleep endpoint, and only then starts the next
+model. Text containers use `/sleep?level=${GPTCLONE_WARM_SLEEP_LEVEL:-1}`;
+Flux uses `/v1/omni/sleep` with `GPTCLONE_WARM_SLEEP_API=omni`.
+The Flux image container shares the same GPU budget. Django treats it as a
+managed image server: text requests sleep Flux through vLLM-Omni before waking
+a text model, and image requests sleep managed text containers before starting
+or waking Flux. If a stale Flux container was not recreated with Omni sleep mode
+enabled, the switch fails loudly instead of silently stopping Flux. Set
+`IMAGE_SLEEP_FALLBACK_STOP_ENABLED=1` only if you prefer the old stop-on-failure
+behavior.
 
 You can also run the same backend warmup manually:
 
@@ -127,6 +147,22 @@ Existing running containers must be recreated before changed `max-num-seqs` or
 vLLM sleep mode is enabled with `VLLM_SERVER_DEV_MODE=1` and
 `--enable-sleep-mode`. Because those development endpoints expose operational
 controls, vLLM ports are bound to `127.0.0.1` only.
+
+The Flux image model is loaded from
+`models/Vllm/FLUX.2-klein-base-4B` and mounted as `/models/flux` in the
+`vllm-flux` service. The Flux container is pinned for production stability:
+`vllm/vllm-openai:v0.20.0` by amd64 digest and vLLM-Omni `v0.20.0` by commit
+`4a24a517abc7769b1399ded594558a3fe8269872`. The served image model name is
+`flux`. Flux runs with `--enable-sleep-mode`; the backend uses vLLM-Omni's
+`/v1/omni/sleep` and `/v1/omni/wakeup` endpoints with
+`FLUX_SLEEP_STAGE_IDS=0` and `IMAGE_SLEEP_LEVEL=${IMAGE_SLEEP_LEVEL:-1}`.
+Flux uses the same `vllm-warm-sleep-entrypoint` as the text models. In Omni
+mode, that entrypoint applies a small startup compatibility fix because
+vLLM-Omni `0.20.0` exposes `/v1/omni/sleep` before initializing
+`app.state.sleeping_stages` in pure diffusion mode.
+Override the source directory with `FLUX_MODEL_PATH=/path/to/flux` if the model
+lives somewhere else. The backend exposes it through `/api/image-models/` and
+`/api/images/generations/`, and the frontend image button calls those routes.
 
 The current Qwen model is loaded from `models/Ollama/Qwen3-14b`. That directory
 is mounted as Ollama's `/root/.ollama/models` store, so the existing
@@ -239,6 +275,7 @@ This dev stack keeps separate containers and data folders from earlier local sta
 - vLLM Qwen3 32B AWQ API container: `vllm-qwen3-32b-awq-dev`
 - vLLM QwQ 32B AWQ API container: `vllm-qwq-32b-awq-dev`
 - vLLM DeepSeek R1 Distill Qwen 32B AWQ API container: `vllm-deepseek-r1-distill-qwen-32b-awq-dev`
+- vLLM-Omni Flux image API container: `vllm-flux-dev`
 - Ollama API container: `ollama-qwen3-14b-dev`
 - PostgreSQL container: `vllm-postgres-dev`
 - pgAdmin container: `vllm-pgadmin-dev`

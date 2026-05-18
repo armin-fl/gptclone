@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -41,11 +42,13 @@ import {
   createConversation,
   deleteConversation,
   forkConversationFromMessage,
+  generateImage,
   getConversation,
   getMe,
   getSession,
   HttpError,
   listConversations,
+  listImageModels,
   listModels,
   refreshAuthToken,
   requestPhoneChangeOtp,
@@ -65,6 +68,7 @@ import type {
   Conversation,
   ConversationDetail,
   ConversationPage,
+  ImageModelStatus,
   InitialChatData,
   LlmModelStatus,
   SubscriptionPlan,
@@ -114,6 +118,14 @@ interface ModelOption {
 }
 
 type ModelRuntimeState = "awake" | "sleeping" | "waking" | "stopped" | "unavailable";
+
+interface GeneratedImage {
+  id: string;
+  src: string;
+  width: number;
+  height: number;
+  revisedPrompt?: string | null;
+}
 
 interface SubscriptionPlanOption {
   id: SubscriptionPlan;
@@ -584,6 +596,15 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const [draft, setDraft] = useState("");
   const [systemInstruction, setSystemInstruction] = useState(DEFAULT_SYSTEM_INSTRUCTION);
   const [selectedModel, setSelectedModel] = useState(MODEL_OPTIONS[0].id);
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [imageNegativePrompt, setImageNegativePrompt] = useState("");
+  const [imageSize, setImageSize] = useState("1024x1024");
+  const [imageSeed, setImageSeed] = useState("");
+  const [imageModels, setImageModels] = useState<ImageModelStatus[]>([]);
+  const [isImagePanelOpen, setIsImagePanelOpen] = useState(false);
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [generatedImages, setGeneratedImages] = useState<GeneratedImage[]>([]);
+  const [imageGenerationError, setImageGenerationError] = useState<string | null>(null);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>("none");
   const [modelStatuses, setModelStatuses] = useState<Record<string, LlmModelStatus>>({});
   const [isRefreshingModelStatuses, setIsRefreshingModelStatuses] = useState(false);
@@ -689,6 +710,12 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const thinkingButtonLabel = activeThinkingOption?.label ?? "Off";
   const isActiveModelAvailable = activeModel.enabled;
   const canSubmitDraft = Boolean(draft.trim()) && isActiveModelAvailable;
+  const activeImageModel = imageModels[0];
+  const canGenerateImage =
+    Boolean(imagePrompt.trim()) &&
+    Boolean(activeImageModel) &&
+    activeImageModel.available &&
+    !isGeneratingImage;
   const profileDisplayName = getDisplayName(currentUser, phoneNumber);
   const profileImageUrl = currentUser?.profile_image_url || "";
   const currentSubscriptionPlan = currentUser?.subscription_plan ?? "free";
@@ -832,6 +859,10 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     setIsComposingNewChat(false);
     setDraft("");
     setModelStatuses({});
+    setImageModels([]);
+    setGeneratedImages([]);
+    setImagePrompt("");
+    setImageNegativePrompt("");
     setCurrentConversationUrl(null);
     window.localStorage.removeItem(LEGACY_ACCESS_TOKEN_STORAGE_KEY);
     window.localStorage.removeItem(LEGACY_REFRESH_TOKEN_STORAGE_KEY);
@@ -976,6 +1007,20 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     }
   }, [applyModelStatuses, authSession, performAuthenticated]);
 
+  const refreshImageModels = useCallback(async () => {
+    if (!authSession) {
+      setImageModels([]);
+      return;
+    }
+
+    try {
+      const response = await performAuthenticated(() => listImageModels());
+      setImageModels(response.models);
+    } catch {
+      setImageModels([]);
+    }
+  }, [authSession, performAuthenticated]);
+
   useEffect(() => {
     if (!authSession) {
       return;
@@ -993,6 +1038,18 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       window.clearInterval(intervalId);
     };
   }, [authSession, refreshModelStatuses]);
+
+  useEffect(() => {
+    if (!authSession) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void refreshImageModels();
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [authSession, refreshImageModels]);
 
   useEffect(() => {
     if (!authSession) {
@@ -1330,6 +1387,19 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     closeProfileMenus();
   }
 
+  function openImagePanel() {
+    if (!authSession) {
+      setError("Sign in first.");
+      return;
+    }
+    if (!imagePrompt.trim() && draft.trim()) {
+      setImagePrompt(draft.trim());
+    }
+    setImageGenerationError(null);
+    setIsImagePanelOpen(true);
+    void refreshImageModels();
+  }
+
   function handleSystemInstructionChange(value: string) {
     setSystemInstruction(value);
     window.localStorage.setItem(SYSTEM_INSTRUCTION_STORAGE_KEY, value);
@@ -1355,6 +1425,207 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       >
         {getInitials(phoneNumber, currentUser)}
       </span>
+    );
+  }
+
+  function renderImageGeneratorModal() {
+    if (!isImagePanelOpen) {
+      return null;
+    }
+
+    const modalFieldClass = cn(
+      "h-10 w-full rounded-lg border px-3 text-sm outline-none transition",
+      isDark
+        ? "!border-[#4a4a4a] !bg-[#303030] !text-[#f4f4f4] !placeholder:text-[#a8a8a8] focus:!border-[#6f6f6f]"
+        : "!border-[#d4d4d4] !bg-[#f7f7f7] !text-[#171717] !placeholder:text-[#777777] focus:!border-[#9a9a9a]",
+    );
+    const modalTextareaClass = cn(
+      "min-h-28 w-full resize-y rounded-lg border px-3 py-2 text-sm leading-6 outline-none transition",
+      isDark
+        ? "!border-[#4a4a4a] !bg-[#303030] !text-[#f4f4f4] !placeholder:text-[#a8a8a8] focus:!border-[#6f6f6f]"
+        : "!border-[#d4d4d4] !bg-[#f7f7f7] !text-[#171717] !placeholder:text-[#777777] focus:!border-[#9a9a9a]",
+    );
+    const mutedTextClass = isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]";
+    const dividerClass = isDark ? "border-[#3a3a3a]" : "border-[#dddddd]";
+    const imageModelLabel = activeImageModel?.label ?? "Flux";
+    const imageModelStatus = !activeImageModel
+      ? "Not configured"
+      : activeImageModel.available
+        ? "Ready"
+        : "Offline";
+
+    return (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center px-4 py-6">
+        <button
+          type="button"
+          className="absolute inset-0 bg-black/70 backdrop-blur-[1px]"
+          aria-label="Close image generator"
+          onClick={() => setIsImagePanelOpen(false)}
+        />
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image generator"
+          className={cn(
+            "relative flex h-[min(680px,92vh)] w-full max-w-[860px] flex-col overflow-hidden rounded-2xl border shadow-2xl",
+            isDark
+              ? "border-[#2f2f2f] bg-[#212121] text-[#f4f4f4]"
+              : "border-[#d9d9d9] bg-white text-[#171717]",
+          )}
+        >
+          <header className={cn("flex items-center justify-between border-b px-5 py-4", dividerClass)}>
+            <div className="flex min-w-0 items-center gap-3">
+              <div
+                className={cn(
+                  "grid h-10 w-10 place-items-center rounded-lg",
+                  isDark ? "bg-[#303030]" : "bg-[#f1f1f1]",
+                )}
+              >
+                <Palette className="h-5 w-5" />
+              </div>
+              <div className="min-w-0">
+                <h2 className="truncate text-lg font-medium">{imageModelLabel}</h2>
+                <p className={cn("text-xs", mutedTextClass)}>{imageModelStatus}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsImagePanelOpen(false)}
+              className={cn(
+                "grid h-9 w-9 place-items-center rounded-lg transition",
+                isDark ? "hover:bg-[#303030]" : "hover:bg-[#e9e9e9]",
+              )}
+              aria-label="Close"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </header>
+
+          <div className="grid min-h-0 flex-1 gap-0 md:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
+            <form
+              onSubmit={handleGenerateImage}
+              className={cn("flex min-h-0 flex-col gap-4 border-b p-5 md:border-b-0 md:border-r", dividerClass)}
+            >
+              <label className="block space-y-2 text-sm">
+                <span className="font-medium">Prompt</span>
+                <textarea
+                  value={imagePrompt}
+                  onChange={(event) => setImagePrompt(event.target.value)}
+                  dir="auto"
+                  className={modalTextareaClass}
+                  placeholder="A cinematic portrait in soft window light"
+                />
+              </label>
+
+              <label className="block space-y-2 text-sm">
+                <span className="font-medium">Negative prompt</span>
+                <input
+                  value={imageNegativePrompt}
+                  onChange={(event) => setImageNegativePrompt(event.target.value)}
+                  className={modalFieldClass}
+                  placeholder="blurry, low quality"
+                />
+              </label>
+
+              <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-1 lg:grid-cols-2">
+                <label className="block space-y-2 text-sm">
+                  <span className="font-medium">Size</span>
+                  <select
+                    value={imageSize}
+                    onChange={(event) => setImageSize(event.target.value)}
+                    className={modalFieldClass}
+                  >
+                    <option value="768x768">768 x 768</option>
+                    <option value="1024x1024">1024 x 1024</option>
+                    <option value="1280x768">1280 x 768</option>
+                    <option value="768x1280">768 x 1280</option>
+                  </select>
+                </label>
+                <label className="block space-y-2 text-sm">
+                  <span className="font-medium">Seed</span>
+                  <input
+                    value={imageSeed}
+                    onChange={(event) => setImageSeed(event.target.value.replace(/[^0-9]/g, ""))}
+                    inputMode="numeric"
+                    className={modalFieldClass}
+                    placeholder="Random"
+                  />
+                </label>
+              </div>
+
+              {activeImageModel && !activeImageModel.available ? (
+                <p className="rounded-lg bg-[#ef4444]/10 px-3 py-2 text-sm text-[#ef4444]">
+                  {activeImageModel.reason || "Flux is offline."}
+                </p>
+              ) : null}
+              {imageGenerationError ? (
+                <p className="rounded-lg bg-[#ef4444]/10 px-3 py-2 text-sm text-[#ef4444]">
+                  {imageGenerationError}
+                </p>
+              ) : null}
+
+              <div className="mt-auto flex flex-wrap items-center gap-3">
+                <Button
+                  type="submit"
+                  disabled={!canGenerateImage}
+                  className="h-10 rounded-full bg-[#4668d9] px-5 text-white hover:bg-[#5577ea] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isGeneratingImage ? "Generating..." : "Generate"}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => void refreshImageModels()}
+                  className={cn(
+                    "h-10 rounded-full px-4 text-sm font-medium transition",
+                    isDark ? "bg-[#303030] hover:bg-[#3a3a3a]" : "bg-[#eeeeee] hover:bg-[#e1e1e1]",
+                  )}
+                >
+                  Refresh
+                </button>
+              </div>
+            </form>
+
+            <section className="min-h-0 overflow-y-auto p-5">
+              {generatedImages.length ? (
+                <div className="grid gap-4">
+                  {generatedImages.map((image) => (
+                    <figure
+                      key={image.id}
+                      className={cn(
+                        "overflow-hidden rounded-lg border",
+                        isDark ? "border-[#3a3a3a] bg-[#171717]" : "border-[#dddddd] bg-[#f7f7f7]",
+                      )}
+                    >
+                      <Image
+                        src={image.src}
+                        alt={imagePrompt || "Generated image"}
+                        width={image.width}
+                        height={image.height}
+                        unoptimized
+                        className="h-auto w-full object-contain"
+                      />
+                      {image.revisedPrompt ? (
+                        <figcaption className={cn("border-t px-3 py-2 text-xs", dividerClass, mutedTextClass)}>
+                          {image.revisedPrompt}
+                        </figcaption>
+                      ) : null}
+                    </figure>
+                  ))}
+                </div>
+              ) : (
+                <div
+                  className={cn(
+                    "grid h-full min-h-[280px] place-items-center rounded-lg border border-dashed px-6 text-center text-sm",
+                    isDark ? "border-[#3a3a3a] text-[#9b9b9b]" : "border-[#dedede] text-[#6f6f6f]",
+                  )}
+                >
+                  <span>{isGeneratingImage ? "Rendering image..." : "No image yet"}</span>
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -1603,6 +1874,68 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete chat.");
+    }
+  }
+
+  async function handleGenerateImage(event: React.FormEvent) {
+    event.preventDefault();
+    const prompt = imagePrompt.trim();
+    if (!prompt || isGeneratingImage) {
+      return;
+    }
+    if (!authSession) {
+      setImageGenerationError("Sign in first.");
+      return;
+    }
+    if (!activeImageModel) {
+      setImageGenerationError("No image model is configured.");
+      return;
+    }
+    if (!activeImageModel.available) {
+      setImageGenerationError(activeImageModel.reason || "Flux is not running.");
+      void refreshImageModels();
+      return;
+    }
+
+    const parsedSeed = imageSeed.trim() ? Number.parseInt(imageSeed.trim(), 10) : undefined;
+    if (imageSeed.trim() && Number.isNaN(parsedSeed)) {
+      setImageGenerationError("Seed must be a whole number.");
+      return;
+    }
+
+    setIsGeneratingImage(true);
+    setImageGenerationError(null);
+    try {
+      const response = await performAuthenticated(() =>
+        generateImage({
+          model: activeImageModel.id,
+          prompt,
+          negative_prompt: imageNegativePrompt.trim() || undefined,
+          size: imageSize,
+          n: 1,
+          num_inference_steps: 50,
+          guidance_scale: 4,
+          seed: parsedSeed,
+        }),
+      );
+      const [imageWidth, imageHeight] = imageSize.split("x").map((part) => Number.parseInt(part, 10));
+      const images = response.data
+        .filter((item) => item.b64_json || item.url)
+        .map((item, index) => ({
+          id: `${Date.now()}-${index}`,
+          src: item.b64_json ? `data:image/png;base64,${item.b64_json}` : String(item.url),
+          width: imageWidth || 1024,
+          height: imageHeight || 1024,
+          revisedPrompt: item.revised_prompt,
+        }));
+      if (!images.length) {
+        throw new Error("Flux returned no image data.");
+      }
+      setGeneratedImages(images);
+    } catch (err) {
+      setImageGenerationError(err instanceof Error ? err.message : "Failed to generate image.");
+    } finally {
+      setIsGeneratingImage(false);
     }
   }
 
@@ -3981,6 +4314,18 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                     >
                       <Plus className="h-5 w-5" />
                     </button>
+                    <button
+                      type="button"
+                      onClick={openImagePanel}
+                      className={cn(
+                        "grid h-9 w-9 shrink-0 place-items-center rounded-full transition",
+                        isDark ? "text-[#f4f4f4] hover:bg-[#3f3f3f]" : "text-[#2f2f2f] hover:bg-[#f2f2f2]",
+                      )}
+                      aria-label="Generate image"
+                      title="Generate image"
+                    >
+                      <Palette className="h-5 w-5" />
+                    </button>
                     <div ref={thinkingMenuRef} className="relative shrink-0">
                       <button
                         type="button"
@@ -4111,6 +4456,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
             </div>
           ) : null}
         </SidebarInset>
+        {renderImageGeneratorModal()}
         {renderAccountModal()}
         {renderEditWarningModal()}
     </SidebarProvider>

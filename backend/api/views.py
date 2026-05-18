@@ -24,16 +24,21 @@ from .serializers import (
     ConversationCreateSerializer,
     ConversationUpdateSerializer,
     EditMessageSerializer,
+    ImageGenerationSerializer,
     MessageSerializer,
     RegenerateMessageSerializer,
     SendMessageSerializer,
 )
 from .services import (
+    UnsupportedImageModelError,
     UnsupportedLlmModelError,
     build_history_as_system_message,
+    get_available_image_models,
     get_available_llm_models,
+    get_image_model_statuses,
     get_llm_model_statuses,
     has_thinking_content,
+    request_image_generation,
     request_llm_chat,
     stream_llm_chat,
 )
@@ -88,6 +93,63 @@ class LlmModelListView(APIView):
 
     def get(self, request):
         return Response({"models": get_llm_model_statuses()})
+
+
+class ImageModelListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"models": get_image_model_statuses()})
+
+
+class ImageGenerationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ImageGenerationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+        model = payload.get("model") or settings.IMAGE_MODEL
+        if model not in get_available_image_models():
+            return Response(
+                {
+                    "detail": "Unsupported image model.",
+                    "available_models": get_available_image_models(),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            return Response(
+                request_image_generation(
+                    model=model,
+                    prompt=payload["prompt"],
+                    n=payload.get("n", 1),
+                    size=payload.get("size", "1024x1024"),
+                    negative_prompt=payload.get("negative_prompt", ""),
+                    num_inference_steps=payload.get("num_inference_steps"),
+                    guidance_scale=payload.get("guidance_scale"),
+                    true_cfg_scale=payload.get("true_cfg_scale"),
+                    seed=payload.get("seed"),
+                    user_id=str(request.user.id) if request.user and request.user.is_authenticated else None,
+                )
+            )
+        except UnsupportedImageModelError as exc:
+            return Response(
+                {
+                    "detail": "Unsupported image model.",
+                    "error": str(exc),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except RuntimeError as exc:
+            return Response(
+                {
+                    "detail": "Failed to generate image.",
+                    "error": str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
 
 class ConversationListCreateView(APIView):
