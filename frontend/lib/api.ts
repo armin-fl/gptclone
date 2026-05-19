@@ -8,6 +8,9 @@ import type {
   ImageGenerationResponse,
   ImageModelsResponse,
   InitialChatData,
+  KnowledgeDocument,
+  KnowledgeDocumentsResponse,
+  KnowledgeSearchResponse,
   LlmModelsResponse,
   OTPRequestResponse,
   ThinkingEffort,
@@ -212,6 +215,34 @@ export function generateImage(payload: {
   });
 }
 
+export function listKnowledgeDocuments() {
+  return request<KnowledgeDocumentsResponse>("/api/knowledge/documents");
+}
+
+export function createKnowledgeDocument(payload: {
+  title?: string;
+  source_name?: string;
+  content: string;
+}) {
+  return request<KnowledgeDocument>("/api/knowledge/documents", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteKnowledgeDocument(documentId: string) {
+  return request<void>(`/api/knowledge/documents/${documentId}`, {
+    method: "DELETE",
+  });
+}
+
+export function searchKnowledge(payload: { query: string; top_k?: number }) {
+  return request<KnowledgeSearchResponse>("/api/knowledge/search", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getConversation(
   conversationId: string,
   params: { before?: string | null; limit?: number } = {},
@@ -334,6 +365,7 @@ export async function streamMessage(
     content: string;
     model?: string;
     system_instruction?: string;
+    rag_enabled?: boolean;
     thinking_enabled?: boolean;
     thinking_effort?: ThinkingEffort;
   },
@@ -354,6 +386,7 @@ export async function streamRegenerateMessage(
   payload: {
     model?: string;
     system_instruction?: string;
+    rag_enabled?: boolean;
     thinking_enabled?: boolean;
     thinking_effort?: ThinkingEffort;
   },
@@ -375,6 +408,7 @@ export async function streamEditMessage(
     content: string;
     model?: string;
     system_instruction?: string;
+    rag_enabled?: boolean;
     thinking_enabled?: boolean;
     thinking_effort?: ThinkingEffort;
   },

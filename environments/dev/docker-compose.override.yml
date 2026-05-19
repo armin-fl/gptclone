@@ -87,6 +87,107 @@ services:
               capabilities: [gpu]
     healthcheck: *vllm-warm-sleep-healthcheck
 
+  vllm-qwen3-vl-embedding-2b:
+    image: vllm:gptclone
+    container_name: vllm-qwen3-vl-embedding-2b-dev
+    restart: unless-stopped
+    ipc: host
+    environment:
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+      OTEL_SERVICE_NAME: vllm-qwen3-vl-embedding-2b
+    ports:
+      - "127.0.0.1:8011:8000"
+    volumes:
+      - ../../data/huggingface:/root/.cache/huggingface
+      - ${QWEN3_VL_EMBEDDING_2B_MODEL_PATH:-../../models/Vllm/Qwen3-VL-Embedding-2B}:/models/qwen3-vl-embedding-2b:ro
+    command:
+      - --model
+      - /models/qwen3-vl-embedding-2b
+      - --served-model-name
+      - qwen3-vl-embedding-2b
+      - --runner
+      - pooling
+      - --dtype
+      - auto
+      - --cpu-offload-gb
+      - "${RAG_EMBEDDING_CPU_OFFLOAD_GB:-1}"
+      - --max-model-len
+      - "${RAG_EMBEDDING_MAX_MODEL_LEN:-2048}"
+      - --gpu-memory-utilization
+      - "${VLLM_QWEN3_VL_EMBEDDING_2B_GPU_MEMORY_UTILIZATION:-0.105}"
+      - --language-model-only
+      - --enforce-eager
+      - --otlp-traces-endpoint
+      - http://langfuse-web:3000/api/public/otel/v1/traces
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/v1/models >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 5s
+
+  vllm-qwen3-vl-reranker-2b:
+    image: vllm:gptclone
+    container_name: vllm-qwen3-vl-reranker-2b-dev
+    restart: unless-stopped
+    ipc: host
+    depends_on:
+      vllm-qwen3-vl-embedding-2b:
+        condition: service_healthy
+    environment:
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Basic cGstbGYtZGV2LXByb2plY3Qta2V5OnNrLWxmLWRldi1zZWNyZXQta2V5,x-langfuse-ingestion-version=4
+      OTEL_SERVICE_NAME: vllm-qwen3-vl-reranker-2b
+    ports:
+      - "127.0.0.1:8012:8000"
+    volumes:
+      - ../../data/huggingface:/root/.cache/huggingface
+      - ${QWEN3_VL_RERANKER_2B_MODEL_PATH:-../../models/Vllm/Qwen3-VL-Reranker-2B}:/models/qwen3-vl-reranker-2b:ro
+    command:
+      - --model
+      - /models/qwen3-vl-reranker-2b
+      - --served-model-name
+      - qwen3-vl-reranker-2b
+      - --runner
+      - pooling
+      - --hf-overrides
+      - '{"architectures":["Qwen3VLForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}'
+      - --chat-template
+      - /models/qwen3-vl-reranker-2b/additional_chat_templates/reranker.jinja
+      - --dtype
+      - auto
+      - --cpu-offload-gb
+      - "${RAG_RERANK_CPU_OFFLOAD_GB:-1}"
+      - --max-model-len
+      - "${RAG_RERANK_MAX_MODEL_LEN:-2048}"
+      - --gpu-memory-utilization
+      - "${VLLM_QWEN3_VL_RERANKER_2B_GPU_MEMORY_UTILIZATION:-0.105}"
+      - --language-model-only
+      - --enforce-eager
+      - --otlp-traces-endpoint
+      - http://langfuse-web:3000/api/public/otel/v1/traces
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/v1/models >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 5s
+
   vllm-gpt-oss-20b:
     image: vllm:gptclone
     container_name: vllm-gpt-oss-20b-dev

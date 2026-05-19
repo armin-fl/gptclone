@@ -68,3 +68,65 @@ class Message(models.Model):
 
     def __str__(self) -> str:
         return f"{self.role}: {self.content[:40]}"
+
+
+class KnowledgeDocument(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="knowledge_documents",
+    )
+    title = models.CharField(max_length=255)
+    source_name = models.CharField(max_length=255, blank=True, default="")
+    content_hash = models.CharField(max_length=64)
+    chunk_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        indexes = [
+            models.Index(
+                fields=["user", "-updated_at", "-id"],
+                name="know_doc_user_upd_id_idx",
+            ),
+            models.Index(
+                fields=["user", "content_hash"],
+                name="know_doc_user_hash_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class KnowledgeChunk(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(
+        KnowledgeDocument,
+        on_delete=models.CASCADE,
+        related_name="chunks",
+    )
+    chunk_index = models.PositiveIntegerField()
+    content = models.TextField()
+    metadata = models.JSONField(blank=True, default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["document", "chunk_index"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "chunk_index"],
+                name="know_chunk_document_index_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["document", "chunk_index"],
+                name="know_chunk_doc_index_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.document_id}:{self.chunk_index}"

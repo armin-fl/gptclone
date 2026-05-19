@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Conversation, Message
+from .models import Conversation, KnowledgeDocument, Message
 
 THINKING_EFFORT_CHOICES = ("none", "short", "medium", "long")
 
@@ -69,6 +69,7 @@ class SendMessageSerializer(serializers.Serializer):
     content = serializers.CharField()
     model = serializers.CharField(max_length=100, required=False, allow_blank=True)
     system_instruction = serializers.CharField(required=False, allow_blank=True)
+    rag_enabled = serializers.BooleanField(required=False)
     thinking_enabled = serializers.BooleanField(required=False, default=False)
     thinking_effort = serializers.ChoiceField(
         choices=THINKING_EFFORT_CHOICES,
@@ -94,6 +95,7 @@ class SendMessageSerializer(serializers.Serializer):
 class RegenerateMessageSerializer(serializers.Serializer):
     model = serializers.CharField(max_length=100, required=False, allow_blank=True)
     system_instruction = serializers.CharField(required=False, allow_blank=True)
+    rag_enabled = serializers.BooleanField(required=False)
     thinking_enabled = serializers.BooleanField(required=False, default=False)
     thinking_effort = serializers.ChoiceField(
         choices=THINKING_EFFORT_CHOICES,
@@ -143,3 +145,40 @@ class ImageGenerationSerializer(serializers.Serializer):
         if width % 8 != 0 or height % 8 != 0:
             raise serializers.ValidationError("Size dimensions must be divisible by 8.")
         return f"{width}x{height}"
+
+
+class KnowledgeDocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = KnowledgeDocument
+        fields = (
+            "id",
+            "title",
+            "source_name",
+            "content_hash",
+            "chunk_count",
+            "created_at",
+            "updated_at",
+        )
+
+
+class KnowledgeDocumentCreateSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    source_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    content = serializers.CharField()
+
+    def validate_content(self, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise serializers.ValidationError("Document content cannot be empty.")
+        return clean
+
+
+class KnowledgeSearchSerializer(serializers.Serializer):
+    query = serializers.CharField()
+    top_k = serializers.IntegerField(min_value=1, max_value=50, required=False)
+
+    def validate_query(self, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise serializers.ValidationError("Search query cannot be empty.")
+        return clean

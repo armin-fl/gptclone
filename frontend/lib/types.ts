@@ -74,6 +74,36 @@ export interface ImageGenerationResponse {
   }>;
 }
 
+export interface KnowledgeDocument {
+  id: string;
+  title: string;
+  source_name: string;
+  content_hash: string;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeDocumentsResponse {
+  documents: KnowledgeDocument[];
+}
+
+export interface KnowledgeSearchResult {
+  rank: number;
+  chunk_id: string;
+  document_id: string;
+  document_title: string;
+  source_name: string;
+  chunk_index: number;
+  score: number;
+  rerank_score: number | null;
+  content: string;
+}
+
+export interface KnowledgeSearchResponse {
+  results: KnowledgeSearchResult[];
+}
+
 export interface InitialChatData {
   user: AuthUser | null;
   conversations: ConversationPage;

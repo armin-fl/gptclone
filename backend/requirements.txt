@@ -30,6 +30,7 @@ psycopg==3.3.3
 psycopg-binary==3.3.3
 pydantic==2.13.3
 pydantic_core==2.46.3
+pymilvus==2.6.4
 PyJWT==2.12.1
 requests==2.33.1
 redis==6.4.0

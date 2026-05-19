@@ -2,10 +2,12 @@
 
 This setup runs infrastructure services by default:
 
-- vLLM OpenAI-compatible API servers, started on demand by Django
+- vLLM OpenAI-compatible API servers. Text/image servers are switched by Django;
+  RAG embedding/rerank servers stay running.
 - Ollama local model servers
 - PostgreSQL
 - pgAdmin
+- Milvus vector search for RAG
 - Langfuse observability stack
 
 Django and Next.js run outside Docker.
@@ -48,6 +50,23 @@ cd environments/dev
 docker compose --profile flux up -d --build vllm-flux
 ```
 
+RAG retrieval uses Milvus plus two always-on vLLM model servers. They are not
+started with the `rag` profile and they do not use vLLM sleep mode:
+
+- `qwen3-vl-embedding-2b`: `http://127.0.0.1:8011/v1`
+- `qwen3-vl-reranker-2b`: `http://127.0.0.1:8012/v1`
+
+```bash
+cd environments/dev
+docker compose up -d vllm-qwen3-vl-embedding-2b vllm-qwen3-vl-reranker-2b
+```
+
+The default local model paths are `models/Vllm/Qwen3-VL-Embedding-2B` and
+`models/Vllm/Qwen3-VL-Reranker-2B`. Override them with
+`QWEN3_VL_EMBEDDING_2B_MODEL_PATH` and `QWEN3_VL_RERANKER_2B_MODEL_PATH` if your
+downloads live somewhere else. Milvus is available at `http://127.0.0.1:19530`,
+with its health endpoint proxied on `http://127.0.0.1:9092/healthz`.
+
 Ollama model servers:
 
 - `qwen3:14b`: `http://127.0.0.1:11434/v1`
@@ -86,10 +105,11 @@ a model just because the request finished. It sleeps the current active model
 only when a new request needs a different model, then wakes the requested model.
 The default switch sleep level is `1` for the fastest model-to-model reuse.
 
-The dev Compose override also starts each vLLM container sequentially, waits for
-`/v1/models`, calls the configured sleep endpoint, and only then starts the next
-model. Text containers use `/sleep?level=${GPTCLONE_WARM_SLEEP_LEVEL:-1}`;
-Flux uses `/v1/omni/sleep` with `GPTCLONE_WARM_SLEEP_API=omni`.
+The dev Compose override starts each managed text vLLM container sequentially,
+waits for `/v1/models`, calls the configured sleep endpoint, and only then starts
+the next text model. Text containers use
+`/sleep?level=${GPTCLONE_WARM_SLEEP_LEVEL:-1}`; Flux uses `/v1/omni/sleep` with
+`GPTCLONE_WARM_SLEEP_API=omni`.
 The Flux image container shares the same GPU budget. Django treats it as a
 managed image server: text requests sleep Flux through vLLM-Omni before waking
 a text model, and image requests sleep managed text containers before starting
@@ -144,9 +164,10 @@ out of memory, or a higher value if the model and context length fit
 comfortably.
 Existing running containers must be recreated before changed `max-num-seqs` or
 `gpu-memory-utilization` values take effect.
-vLLM sleep mode is enabled with `VLLM_SERVER_DEV_MODE=1` and
-`--enable-sleep-mode`. Because those development endpoints expose operational
-controls, vLLM ports are bound to `127.0.0.1` only.
+vLLM sleep mode is enabled for text containers with `VLLM_SERVER_DEV_MODE=1` and
+`--enable-sleep-mode`. The RAG embedding and reranker containers intentionally do
+not set those sleep-mode options. Because vLLM ports expose local model APIs,
+they are bound to `127.0.0.1` only.
 
 The Flux image model is loaded from
 `models/Vllm/FLUX.2-klein-base-4B` and mounted as `/models/flux` in the
@@ -163,6 +184,27 @@ vLLM-Omni `0.20.0` exposes `/v1/omni/sleep` before initializing
 Override the source directory with `FLUX_MODEL_PATH=/path/to/flux` if the model
 lives somewhere else. The backend exposes it through `/api/image-models/` and
 `/api/images/generations/`, and the frontend image button calls those routes.
+
+The RAG embedding service loads Qwen3-VL Embedding 2B with `--runner pooling`
+and serves it as `qwen3-vl-embedding-2b` with 2048-dimensional vectors. The
+rerank service loads Qwen3-VL Reranker 2B with vLLM's pooling score/rerank API
+and serves it as `qwen3-vl-reranker-2b`. Both RAG services default to
+`--max-model-len 2048`, `--gpu-memory-utilization 0.105`,
+`--cpu-offload-gb 1`, `--language-model-only`, and `--enforce-eager` so they can
+stay awake without taking the whole GPU budget from text models. The
+language-only flag keeps these VL model servers focused on text RAG and avoids
+reserving memory for image/video prompt handling; the small CPU offload keeps
+the 2048-token RAG window while leaving room for GPT-OSS warmup.
+The default Milvus collection is
+`gptclone_knowledge_chunks_qwen3_vl_2b` so old 1024-dimensional vectors are not
+mixed with the new embeddings.
+RAG operations are traced to Langfuse with the same dev project keys as chat.
+Indexing, search, embedding, Milvus, rerank, and context-building spans include
+operational metrics such as chunk counts, input character counts, embedding
+dimensions, candidate counts, final hit counts, vector scores, rerank scores,
+and fail-open errors. Raw query/document capture inside RAG spans is disabled by
+default; set `RAG_LANGFUSE_CAPTURE_CONTENT=1` when you intentionally want that
+extra detail in Langfuse.
 
 The current Qwen model is loaded from `models/Ollama/Qwen3-14b`. That directory
 is mounted as Ollama's `/root/.ollama/models` store, so the existing

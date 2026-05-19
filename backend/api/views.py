@@ -10,7 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Conversation, Message
+from .models import Conversation, KnowledgeDocument, Message
 from .cache import bump_conversation_cache, bump_user_conversations
 from .conversation_data import (
     latest_prompt_messages,
@@ -25,9 +25,20 @@ from .serializers import (
     ConversationUpdateSerializer,
     EditMessageSerializer,
     ImageGenerationSerializer,
+    KnowledgeDocumentCreateSerializer,
+    KnowledgeDocumentSerializer,
+    KnowledgeSearchSerializer,
     MessageSerializer,
     RegenerateMessageSerializer,
     SendMessageSerializer,
+)
+from .rag import (
+    RagError,
+    build_rag_prompt_context,
+    delete_knowledge_document,
+    index_knowledge_document,
+    retrieve_relevant_chunks,
+    serialize_rag_hit,
 )
 from .services import (
     UnsupportedImageModelError,
@@ -152,6 +163,108 @@ class ImageGenerationView(APIView):
             )
 
 
+class KnowledgeDocumentListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        documents = KnowledgeDocument.objects.filter(user=request.user)
+        return Response({"documents": KnowledgeDocumentSerializer(documents, many=True).data})
+
+    def post(self, request):
+        serializer = KnowledgeDocumentCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+        try:
+            document = index_knowledge_document(
+                user=request.user,
+                content=payload["content"],
+                title=payload.get("title", ""),
+                source_name=payload.get("source_name", ""),
+                langfuse_user_id=str(request.user.id),
+                langfuse_metadata={
+                    "operation": "index_document",
+                    "source_name": payload.get("source_name", ""),
+                    "title": payload.get("title", ""),
+                },
+            )
+        except RagError as exc:
+            return Response(
+                {
+                    "detail": "Failed to index knowledge document.",
+                    "error": str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(KnowledgeDocumentSerializer(document).data, status=status.HTTP_201_CREATED)
+
+
+class KnowledgeDocumentDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, document_id):
+        try:
+            deleted = delete_knowledge_document(
+                user=request.user,
+                document_id=str(document_id),
+                langfuse_user_id=str(request.user.id),
+                langfuse_metadata={
+                    "operation": "delete_document",
+                    "document_id": str(document_id),
+                },
+            )
+        except RagError as exc:
+            return Response(
+                {
+                    "detail": "Failed to delete knowledge document vectors.",
+                    "error": str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if not deleted:
+            return Response({"detail": "Knowledge document not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class KnowledgeSearchView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = KnowledgeSearchSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+        try:
+            hits = retrieve_relevant_chunks(
+                user=request.user,
+                query=payload["query"],
+                top_k=payload.get("top_k"),
+                langfuse_user_id=str(request.user.id),
+                langfuse_metadata={
+                    "operation": "search",
+                    "query_chars": len(payload["query"]),
+                    "top_k": payload.get("top_k"),
+                },
+            )
+        except RagError as exc:
+            return Response(
+                {
+                    "detail": "Failed to search knowledge documents.",
+                    "error": str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {
+                "results": [
+                    serialize_rag_hit(hit, rank=index)
+                    for index, hit in enumerate(hits, start=1)
+                ]
+            }
+        )
+
+
 class ConversationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -238,6 +351,47 @@ class ConversationDetailView(APIView):
 
 class ConversationSendMessageView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def _build_llm_messages(
+        self,
+        *,
+        request_user,
+        system_instruction: str,
+        history_messages,
+        user_content: str,
+        rag_enabled: bool | None,
+        langfuse_session_id: str | None = None,
+        langfuse_user_id: str | None = None,
+        langfuse_metadata: dict | None = None,
+    ) -> tuple[list[dict[str, str]], list[dict], str]:
+        history_system_message = build_history_as_system_message(history_messages)
+        rag_context_message, rag_sources, rag_error = build_rag_prompt_context(
+            user=request_user,
+            query=user_content,
+            enabled=rag_enabled,
+            langfuse_session_id=langfuse_session_id,
+            langfuse_user_id=langfuse_user_id,
+            langfuse_metadata=langfuse_metadata,
+        )
+        system_parts = [system_instruction]
+        if rag_context_message:
+            system_parts.append(rag_context_message)
+        system_parts.append(history_system_message)
+
+        return (
+            [
+                {
+                    "role": "system",
+                    "content": "\n\n".join(system_parts),
+                },
+                {
+                    "role": "user",
+                    "content": user_content,
+                },
+            ],
+            rag_sources,
+            rag_error,
+        )
 
     def _serialize_conversation(self, conversation_id, model: str) -> dict:
         refreshed = Conversation.objects.get(id=conversation_id)
@@ -420,6 +574,7 @@ class ConversationSendMessageView(APIView):
         wants_stream = serializer.validated_data.get("stream", False)
         thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
         thinking_effort = serializer.validated_data.get("thinking_effort", "none")
+        rag_enabled = serializer.validated_data.get("rag_enabled")
 
         with transaction.atomic():
             # Flow 3: store the USER message first so later history and response include this request.
@@ -430,25 +585,34 @@ class ConversationSendMessageView(APIView):
             )
 
             previous_messages = latest_prompt_messages(conversation, exclude_message_id=user_message.id)
-            # Flow 4: build_history_as_system_message() turns older messages into LLM context.
-            history_system_message = build_history_as_system_message(previous_messages)
-
-            llm_messages = [
-                {
-                    "role": "system",
-                    "content": f"{system_instruction}\n\n{history_system_message}",
-                },
-                {
-                    "role": "user",
-                    "content": user_message.content,
-                },
-            ]
+            # Flow 4: older messages and optional RAG snippets become the LLM system context.
+            rag_langfuse_metadata = {
+                "conversation_id": str(conversation.id),
+                "message_id": user_message.id,
+                "chat_action": "send",
+                "rag_enabled": rag_enabled if rag_enabled is not None else settings.RAG_ENABLED,
+            }
+            llm_messages, rag_sources, rag_error = self._build_llm_messages(
+                request_user=request.user,
+                system_instruction=system_instruction,
+                history_messages=previous_messages,
+                user_content=user_message.content,
+                rag_enabled=rag_enabled,
+                langfuse_session_id=str(conversation.id),
+                langfuse_user_id=str(conversation.user_id) if conversation.user_id else None,
+                langfuse_metadata=rag_langfuse_metadata,
+            )
             langfuse_metadata = {
                 "conversation_id": str(conversation.id),
                 "message_id": user_message.id,
+                "chat_action": "send",
                 "thinking_enabled": thinking_enabled,
                 "thinking_effort": thinking_effort,
+                "rag_enabled": rag_enabled if rag_enabled is not None else settings.RAG_ENABLED,
+                "rag_hit_count": len(rag_sources),
             }
+            if rag_error:
+                langfuse_metadata["rag_error"] = rag_error[:500]
 
             if wants_stream:
                 if conversation.title == Conversation.DEFAULT_TITLE:
@@ -549,6 +713,7 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
         wants_stream = serializer.validated_data.get("stream", False)
         thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
         thinking_effort = serializer.validated_data.get("thinking_effort", "none")
+        rag_enabled = serializer.validated_data.get("rag_enabled")
 
         with transaction.atomic():
             locked_conversation = (
@@ -596,24 +761,35 @@ class ConversationRegenerateMessageView(ConversationSendMessageView):
 
             user_message = messages[user_index]
             previous_messages = messages[:user_index]
-            history_system_message = build_history_as_system_message(previous_messages)
-            llm_messages = [
-                {
-                    "role": "system",
-                    "content": f"{system_instruction}\n\n{history_system_message}",
-                },
-                {
-                    "role": "user",
-                    "content": user_message.content,
-                },
-            ]
+            rag_langfuse_metadata = {
+                "conversation_id": str(locked_conversation.id),
+                "message_id": user_message.id,
+                "regenerated_message_id": target_message.id,
+                "chat_action": "regenerate",
+                "rag_enabled": rag_enabled if rag_enabled is not None else settings.RAG_ENABLED,
+            }
+            llm_messages, rag_sources, rag_error = self._build_llm_messages(
+                request_user=request.user,
+                system_instruction=system_instruction,
+                history_messages=previous_messages,
+                user_content=user_message.content,
+                rag_enabled=rag_enabled,
+                langfuse_session_id=str(locked_conversation.id),
+                langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
+                langfuse_metadata=rag_langfuse_metadata,
+            )
             langfuse_metadata = {
                 "conversation_id": str(locked_conversation.id),
                 "message_id": user_message.id,
                 "regenerated_message_id": target_message.id,
+                "chat_action": "regenerate",
                 "thinking_enabled": thinking_enabled,
                 "thinking_effort": thinking_effort,
+                "rag_enabled": rag_enabled if rag_enabled is not None else settings.RAG_ENABLED,
+                "rag_hit_count": len(rag_sources),
             }
+            if rag_error:
+                langfuse_metadata["rag_error"] = rag_error[:500]
 
             target_message.delete()
             locked_conversation.updated_at = timezone.now()
@@ -761,6 +937,7 @@ class ConversationEditMessageView(ConversationSendMessageView):
         wants_stream = serializer.validated_data.get("stream", False)
         thinking_enabled = serializer.validated_data.get("thinking_enabled", False)
         thinking_effort = serializer.validated_data.get("thinking_effort", "none")
+        rag_enabled = serializer.validated_data.get("rag_enabled")
         edited_content = serializer.validated_data["content"]
 
         with transaction.atomic():
@@ -783,24 +960,35 @@ class ConversationEditMessageView(ConversationSendMessageView):
                 )
 
             previous_messages = messages[:target_index]
-            history_system_message = build_history_as_system_message(previous_messages)
-            llm_messages = [
-                {
-                    "role": "system",
-                    "content": f"{system_instruction}\n\n{history_system_message}",
-                },
-                {
-                    "role": "user",
-                    "content": edited_content,
-                },
-            ]
+            rag_langfuse_metadata = {
+                "conversation_id": str(locked_conversation.id),
+                "message_id": target_message.id,
+                "edited_message_id": target_message.id,
+                "chat_action": "edit",
+                "rag_enabled": rag_enabled if rag_enabled is not None else settings.RAG_ENABLED,
+            }
+            llm_messages, rag_sources, rag_error = self._build_llm_messages(
+                request_user=request.user,
+                system_instruction=system_instruction,
+                history_messages=previous_messages,
+                user_content=edited_content,
+                rag_enabled=rag_enabled,
+                langfuse_session_id=str(locked_conversation.id),
+                langfuse_user_id=str(locked_conversation.user_id) if locked_conversation.user_id else None,
+                langfuse_metadata=rag_langfuse_metadata,
+            )
             langfuse_metadata = {
                 "conversation_id": str(locked_conversation.id),
                 "message_id": target_message.id,
                 "edited_message_id": target_message.id,
+                "chat_action": "edit",
                 "thinking_enabled": thinking_enabled,
                 "thinking_effort": thinking_effort,
+                "rag_enabled": rag_enabled if rag_enabled is not None else settings.RAG_ENABLED,
+                "rag_hit_count": len(rag_sources),
             }
+            if rag_error:
+                langfuse_metadata["rag_error"] = rag_error[:500]
 
             target_message.content = edited_content
             target_message.save(update_fields=["content"])

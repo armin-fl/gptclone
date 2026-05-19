@@ -12,6 +12,7 @@ import {
   Check,
   ChevronDown,
   Copy,
+  FileText,
   GitFork,
   LogOut,
   Menu,
@@ -34,13 +35,16 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash2,
+  Upload,
   UserRound,
   X,
 } from "lucide-react";
 
 import {
+  createKnowledgeDocument,
   createConversation,
   deleteConversation,
+  deleteKnowledgeDocument,
   forkConversationFromMessage,
   generateImage,
   getConversation,
@@ -49,6 +53,7 @@ import {
   HttpError,
   listConversations,
   listImageModels,
+  listKnowledgeDocuments,
   listModels,
   refreshAuthToken,
   requestPhoneChangeOtp,
@@ -70,6 +75,7 @@ import type {
   ConversationPage,
   ImageModelStatus,
   InitialChatData,
+  KnowledgeDocument,
   LlmModelStatus,
   SubscriptionPlan,
   ThinkingControl,
@@ -96,6 +102,8 @@ const PHONE_LENGTH = PHONE_PREFIX.length + PHONE_REST_LENGTH;
 const PHONE_NUMBER_PATTERN = /^09[0-9]{9}$/;
 const CHAT_BOTTOM_THRESHOLD = 56;
 const MODEL_STATUS_REFRESH_MS = 15000;
+const KNOWLEDGE_ACCEPTED_FILE_TYPES = ".txt,.md,.markdown,.csv,.json,.log,text/*,application/json";
+const KNOWLEDGE_TEXT_FILE_EXTENSIONS = [".txt", ".md", ".markdown", ".csv", ".json", ".log"];
 const DEFAULT_SYSTEM_INSTRUCTION =
   "You are a helpful AI assistant. Use concise and actionable answers unless the user asks for detail.";
 
@@ -420,6 +428,31 @@ function daysAgo(value: string): number {
   return Math.floor((startOfToday - startOfDate) / 86_400_000);
 }
 
+function formatShortDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
+
+function titleFromFileName(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim() || fileName;
+}
+
+function isSupportedKnowledgeFile(file: File): boolean {
+  if (file.type.startsWith("text/") || file.type === "application/json") {
+    return true;
+  }
+
+  const lowerName = file.name.toLowerCase();
+  return KNOWLEDGE_TEXT_FILE_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
+}
+
 function getDisplayName(user: AuthUser | null, fallbackPhoneNumber: string): string {
   const fullName = [user?.first_name, user?.last_name].filter(Boolean).join(" ").trim();
   return fullName || user?.phone_number || fallbackPhoneNumber || "Guest profile";
@@ -605,6 +638,16 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
   const [generatedImages, setGeneratedImages] = useState<GeneratedImage[]>([]);
   const [imageGenerationError, setImageGenerationError] = useState<string | null>(null);
+  const [isKnowledgePanelOpen, setIsKnowledgePanelOpen] = useState(false);
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>([]);
+  const [isLoadingKnowledgeDocuments, setIsLoadingKnowledgeDocuments] = useState(false);
+  const [isIndexingKnowledge, setIsIndexingKnowledge] = useState(false);
+  const [deletingKnowledgeDocumentId, setDeletingKnowledgeDocumentId] = useState<string | null>(null);
+  const [knowledgeTitle, setKnowledgeTitle] = useState("");
+  const [knowledgeSourceName, setKnowledgeSourceName] = useState("");
+  const [knowledgeContent, setKnowledgeContent] = useState("");
+  const [knowledgeMessage, setKnowledgeMessage] = useState<string | null>(null);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>("none");
   const [modelStatuses, setModelStatuses] = useState<Record<string, LlmModelStatus>>({});
   const [isRefreshingModelStatuses, setIsRefreshingModelStatuses] = useState(false);
@@ -863,6 +906,16 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     setGeneratedImages([]);
     setImagePrompt("");
     setImageNegativePrompt("");
+    setIsKnowledgePanelOpen(false);
+    setKnowledgeDocuments([]);
+    setIsLoadingKnowledgeDocuments(false);
+    setIsIndexingKnowledge(false);
+    setDeletingKnowledgeDocumentId(null);
+    setKnowledgeTitle("");
+    setKnowledgeSourceName("");
+    setKnowledgeContent("");
+    setKnowledgeMessage(null);
+    setKnowledgeError(null);
     setCurrentConversationUrl(null);
     window.localStorage.removeItem(LEGACY_ACCESS_TOKEN_STORAGE_KEY);
     window.localStorage.removeItem(LEGACY_REFRESH_TOKEN_STORAGE_KEY);
@@ -1021,6 +1074,24 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     }
   }, [authSession, performAuthenticated]);
 
+  const refreshKnowledgeDocuments = useCallback(async () => {
+    if (!authSession) {
+      setKnowledgeDocuments([]);
+      return;
+    }
+
+    setIsLoadingKnowledgeDocuments(true);
+    setKnowledgeError(null);
+    try {
+      const response = await performAuthenticated(() => listKnowledgeDocuments());
+      setKnowledgeDocuments(response.documents);
+    } catch (err) {
+      setKnowledgeError(err instanceof Error ? err.message : "Failed to load knowledge documents.");
+    } finally {
+      setIsLoadingKnowledgeDocuments(false);
+    }
+  }, [authSession, performAuthenticated]);
+
   useEffect(() => {
     if (!authSession) {
       return;
@@ -1050,6 +1121,18 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
 
     return () => window.clearTimeout(timeoutId);
   }, [authSession, refreshImageModels]);
+
+  useEffect(() => {
+    if (!authSession || !isKnowledgePanelOpen) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void refreshKnowledgeDocuments();
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [authSession, isKnowledgePanelOpen, refreshKnowledgeDocuments]);
 
   useEffect(() => {
     if (!authSession) {
@@ -1387,6 +1470,18 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     closeProfileMenus();
   }
 
+  function openKnowledgePanel() {
+    if (!authSession) {
+      setError("Sign in first.");
+      return;
+    }
+
+    setKnowledgeMessage(null);
+    setKnowledgeError(null);
+    setIsKnowledgePanelOpen(true);
+    closeProfileMenus();
+  }
+
   function openImagePanel() {
     if (!authSession) {
       setError("Sign in first.");
@@ -1398,6 +1493,94 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
     setImageGenerationError(null);
     setIsImagePanelOpen(true);
     void refreshImageModels();
+  }
+
+  function resetKnowledgeDraft() {
+    setKnowledgeTitle("");
+    setKnowledgeSourceName("");
+    setKnowledgeContent("");
+  }
+
+  async function handleKnowledgeFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    if (!isSupportedKnowledgeFile(file)) {
+      setKnowledgeError("Use a text, Markdown, CSV, JSON, or log file.");
+      setKnowledgeMessage(null);
+      return;
+    }
+
+    setKnowledgeError(null);
+    setKnowledgeMessage(null);
+    try {
+      const content = await file.text();
+      setKnowledgeContent(content);
+      setKnowledgeSourceName(file.name);
+      setKnowledgeTitle((currentTitle) => currentTitle.trim() || titleFromFileName(file.name));
+    } catch {
+      setKnowledgeError("Failed to read that file.");
+    }
+  }
+
+  async function handleIndexKnowledgeDocument(event: React.FormEvent) {
+    event.preventDefault();
+    const content = knowledgeContent.trim();
+    if (!authSession || isIndexingKnowledge) {
+      return;
+    }
+    if (!content) {
+      setKnowledgeError("Document content cannot be empty.");
+      setKnowledgeMessage(null);
+      return;
+    }
+
+    setIsIndexingKnowledge(true);
+    setKnowledgeError(null);
+    setKnowledgeMessage(null);
+    try {
+      const document = await performAuthenticated(() =>
+        createKnowledgeDocument({
+          title: knowledgeTitle.trim() || undefined,
+          source_name: knowledgeSourceName.trim() || undefined,
+          content,
+        }),
+      );
+      setKnowledgeDocuments((prev) => [document, ...prev.filter((item) => item.id !== document.id)]);
+      resetKnowledgeDraft();
+      setKnowledgeMessage("Document indexed.");
+    } catch (err) {
+      setKnowledgeError(err instanceof Error ? err.message : "Failed to index document.");
+    } finally {
+      setIsIndexingKnowledge(false);
+    }
+  }
+
+  async function handleDeleteKnowledgeDocument(document: KnowledgeDocument) {
+    if (!authSession || deletingKnowledgeDocumentId) {
+      return;
+    }
+
+    const shouldDelete = window.confirm(`Delete "${document.title}" from knowledge?`);
+    if (!shouldDelete) {
+      return;
+    }
+
+    setDeletingKnowledgeDocumentId(document.id);
+    setKnowledgeError(null);
+    setKnowledgeMessage(null);
+    try {
+      await performAuthenticated(() => deleteKnowledgeDocument(document.id));
+      setKnowledgeDocuments((prev) => prev.filter((item) => item.id !== document.id));
+      setKnowledgeMessage("Document deleted.");
+    } catch (err) {
+      setKnowledgeError(err instanceof Error ? err.message : "Failed to delete document.");
+    } finally {
+      setDeletingKnowledgeDocumentId(null);
+    }
   }
 
   function handleSystemInstructionChange(value: string) {
@@ -1622,6 +1805,247 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                   <span>{isGeneratingImage ? "Rendering image..." : "No image yet"}</span>
                 </div>
               )}
+            </section>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderKnowledgeModal() {
+    if (!isKnowledgePanelOpen) {
+      return null;
+    }
+
+    const modalFieldClass = cn(
+      "h-10 w-full rounded-lg border px-3 text-sm outline-none transition",
+      isDark
+        ? "!border-[#4a4a4a] !bg-[#303030] !text-[#f4f4f4] !placeholder:text-[#a8a8a8] focus:!border-[#6f6f6f]"
+        : "!border-[#d4d4d4] !bg-[#f7f7f7] !text-[#171717] !placeholder:text-[#777777] focus:!border-[#9a9a9a]",
+    );
+    const modalTextareaClass = cn(
+      "min-h-56 w-full resize-y rounded-lg border px-3 py-2 text-sm leading-6 outline-none transition",
+      isDark
+        ? "!border-[#4a4a4a] !bg-[#303030] !text-[#f4f4f4] !placeholder:text-[#a8a8a8] focus:!border-[#6f6f6f]"
+        : "!border-[#d4d4d4] !bg-[#f7f7f7] !text-[#171717] !placeholder:text-[#777777] focus:!border-[#9a9a9a]",
+    );
+    const mutedTextClass = isDark ? "text-[#b4b4b4]" : "text-[#6f6f6f]";
+    const dividerClass = isDark ? "border-[#3a3a3a]" : "border-[#dddddd]";
+    const documentCount = knowledgeDocuments.length;
+    const chunkCount = knowledgeDocuments.reduce((total, document) => total + document.chunk_count, 0);
+
+    return (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center px-4 py-6">
+        <button
+          type="button"
+          className="absolute inset-0 bg-black/70 backdrop-blur-[1px]"
+          aria-label="Close knowledge"
+          onClick={() => setIsKnowledgePanelOpen(false)}
+        />
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Knowledge"
+          className={cn(
+            "relative flex h-[min(720px,92vh)] w-full max-w-[940px] flex-col overflow-hidden rounded-2xl border shadow-2xl",
+            isDark
+              ? "border-[#2f2f2f] bg-[#212121] text-[#f4f4f4]"
+              : "border-[#d9d9d9] bg-white text-[#171717]",
+          )}
+        >
+          <header className={cn("flex items-center justify-between border-b px-5 py-4", dividerClass)}>
+            <div className="flex min-w-0 items-center gap-3">
+              <div className={cn("grid h-10 w-10 place-items-center rounded-lg", isDark ? "bg-[#303030]" : "bg-[#f1f1f1]")}>
+                <FileText className="h-5 w-5" />
+              </div>
+              <div className="min-w-0">
+                <h2 className="truncate text-lg font-medium">Knowledge</h2>
+                <p className={cn("text-xs", mutedTextClass)}>
+                  {documentCount} {documentCount === 1 ? "document" : "documents"} / {chunkCount} chunks
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsKnowledgePanelOpen(false)}
+              className={cn(
+                "grid h-9 w-9 place-items-center rounded-lg transition",
+                isDark ? "hover:bg-[#303030]" : "hover:bg-[#e9e9e9]",
+              )}
+              aria-label="Close"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </header>
+
+          <div className="grid min-h-0 flex-1 md:grid-cols-[minmax(0,390px)_minmax(0,1fr)]">
+            <form
+              onSubmit={handleIndexKnowledgeDocument}
+              className={cn("flex min-h-0 flex-col gap-4 border-b p-5 md:border-b-0 md:border-r", dividerClass)}
+            >
+              <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-1 lg:grid-cols-2">
+                <label className="block space-y-2 text-sm">
+                  <span className="font-medium">Title</span>
+                  <input
+                    value={knowledgeTitle}
+                    onChange={(event) => setKnowledgeTitle(event.target.value)}
+                    maxLength={255}
+                    className={modalFieldClass}
+                    placeholder="Handbook"
+                  />
+                </label>
+                <label className="block space-y-2 text-sm">
+                  <span className="font-medium">Source</span>
+                  <input
+                    value={knowledgeSourceName}
+                    onChange={(event) => setKnowledgeSourceName(event.target.value)}
+                    maxLength={255}
+                    className={modalFieldClass}
+                    placeholder="handbook.md"
+                  />
+                </label>
+              </div>
+
+              <label
+                htmlFor="knowledge-file-input"
+                className={cn(
+                  "flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed px-3 text-sm font-medium transition",
+                  isDark
+                    ? "border-[#4a4a4a] bg-[#262626] hover:bg-[#303030]"
+                    : "border-[#d4d4d4] bg-[#fafafa] hover:bg-[#f1f1f1]",
+                )}
+              >
+                <Upload className="h-4 w-4" />
+                <span>Choose text file</span>
+              </label>
+              <input
+                id="knowledge-file-input"
+                type="file"
+                accept={KNOWLEDGE_ACCEPTED_FILE_TYPES}
+                className="sr-only"
+                onChange={(event) => void handleKnowledgeFileChange(event)}
+              />
+
+              <label className="block min-h-0 flex-1 space-y-2 text-sm">
+                <span className="font-medium">Content</span>
+                <textarea
+                  value={knowledgeContent}
+                  onChange={(event) => {
+                    setKnowledgeContent(event.target.value);
+                    setKnowledgeMessage(null);
+                    setKnowledgeError(null);
+                  }}
+                  dir="auto"
+                  className={cn(modalTextareaClass, "h-full max-h-[360px]")}
+                  placeholder="Paste document text"
+                />
+              </label>
+
+              {knowledgeError ? (
+                <p className="rounded-lg bg-[#ef4444]/10 px-3 py-2 text-sm text-[#ef4444]">{knowledgeError}</p>
+              ) : null}
+              {knowledgeMessage ? (
+                <p className="rounded-lg bg-[#10a37f]/10 px-3 py-2 text-sm text-[#10a37f]">{knowledgeMessage}</p>
+              ) : null}
+
+              <div className="mt-auto flex flex-wrap items-center gap-3">
+                <Button
+                  type="submit"
+                  disabled={!knowledgeContent.trim() || isIndexingKnowledge}
+                  className="h-10 rounded-full bg-[#10a37f] px-5 text-white hover:bg-[#0d8f6f] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isIndexingKnowledge ? "Indexing..." : "Index document"}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetKnowledgeDraft();
+                    setKnowledgeMessage(null);
+                    setKnowledgeError(null);
+                  }}
+                  className={cn(
+                    "h-10 rounded-full px-4 text-sm font-medium transition",
+                    isDark ? "bg-[#303030] hover:bg-[#3a3a3a]" : "bg-[#eeeeee] hover:bg-[#e1e1e1]",
+                  )}
+                >
+                  Clear
+                </button>
+              </div>
+            </form>
+
+            <section className="flex min-h-0 flex-col p-5">
+              <div className={cn("mb-4 flex items-center justify-between gap-3 border-b pb-4", dividerClass)}>
+                <div>
+                  <h3 className="font-medium">Documents</h3>
+                  <p className={cn("mt-1 text-xs", mutedTextClass)}>Used automatically when RAG is enabled.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void refreshKnowledgeDocuments()}
+                  className={cn(
+                    "h-9 rounded-full px-4 text-sm font-medium transition",
+                    isDark ? "bg-[#303030] hover:bg-[#3a3a3a]" : "bg-[#eeeeee] hover:bg-[#e1e1e1]",
+                  )}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                {isLoadingKnowledgeDocuments ? (
+                  <div className={cn("px-1 py-2 text-sm", mutedTextClass)}>Loading documents...</div>
+                ) : knowledgeDocuments.length ? (
+                  <div className="grid gap-3">
+                    {knowledgeDocuments.map((document) => {
+                      const isDeleting = deletingKnowledgeDocumentId === document.id;
+                      return (
+                        <article
+                          key={document.id}
+                          className={cn(
+                            "rounded-lg border px-4 py-3",
+                            isDark ? "border-[#3a3a3a] bg-[#262626]" : "border-[#dddddd] bg-[#fafafa]",
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <h4 className="truncate text-sm font-medium">{document.title}</h4>
+                              <p className={cn("mt-1 truncate text-xs", mutedTextClass)}>
+                                {document.source_name || "No source"} / {document.chunk_count} chunks
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={isDeleting}
+                              onClick={() => void handleDeleteKnowledgeDocument(document)}
+                              className={cn(
+                                "grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[#ef4444] transition disabled:cursor-not-allowed disabled:opacity-50",
+                                isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#fef2f2]",
+                              )}
+                              aria-label={`Delete ${document.title}`}
+                              title="Delete"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                          <div className={cn("mt-3 flex flex-wrap items-center gap-2 text-xs", mutedTextClass)}>
+                            <span>{formatShortDate(document.updated_at)}</span>
+                            <span className="font-mono">{document.content_hash.slice(0, 8)}</span>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div
+                    className={cn(
+                      "grid min-h-[260px] place-items-center rounded-lg border border-dashed px-6 text-center text-sm",
+                      isDark ? "border-[#3a3a3a] text-[#9b9b9b]" : "border-[#dedede] text-[#6f6f6f]",
+                    )}
+                  >
+                    <span>No knowledge documents yet</span>
+                  </div>
+                )}
+              </div>
             </section>
           </div>
         </div>
@@ -3086,6 +3510,17 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
         </button>
         <button
           type="button"
+          onClick={openKnowledgePanel}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
+            isDark ? "hover:bg-[#3a3a3a]" : "hover:bg-[#f4f4f4]",
+          )}
+        >
+          <FileText className="h-4 w-4" />
+          <span>Knowledge</span>
+        </button>
+        <button
+          type="button"
           onClick={() => openAccountModal("personalization")}
           className={cn(
             "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition",
@@ -4306,11 +4741,13 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
                   >
                     <button
                       type="button"
+                      onClick={openKnowledgePanel}
                       className={cn(
                         "grid h-9 w-9 shrink-0 place-items-center rounded-full transition",
                         isDark ? "text-[#f4f4f4] hover:bg-[#3f3f3f]" : "text-[#2f2f2f] hover:bg-[#f2f2f2]",
                       )}
-                      aria-label="Attach file"
+                      aria-label="Knowledge"
+                      title="Knowledge"
                     >
                       <Plus className="h-5 w-5" />
                     </button>
@@ -4457,6 +4894,7 @@ export function ChatApp({ initialData }: ChatAppProps = {}) {
           ) : null}
         </SidebarInset>
         {renderImageGeneratorModal()}
+        {renderKnowledgeModal()}
         {renderAccountModal()}
         {renderEditWarningModal()}
     </SidebarProvider>

@@ -287,6 +287,54 @@ LLM_MODELS = {
     },
 }
 
+RAG_ENABLED = env_bool("RAG_ENABLED", "0" if IS_TEST_COMMAND else "1")
+RAG_FAIL_OPEN = env_bool("RAG_FAIL_OPEN", "1")
+RAG_MILVUS_URI = os.environ.get("RAG_MILVUS_URI", "http://127.0.0.1:19530")
+RAG_MILVUS_TOKEN = os.environ.get("RAG_MILVUS_TOKEN", "")
+RAG_MILVUS_COLLECTION = os.environ.get("RAG_MILVUS_COLLECTION", "gptclone_knowledge_chunks_qwen3_vl_2b")
+RAG_MILVUS_CONTENT_MAX_LENGTH = int(os.environ.get("RAG_MILVUS_CONTENT_MAX_LENGTH", "8192"))
+RAG_CHUNK_CHARS = int(os.environ.get("RAG_CHUNK_CHARS", "1800"))
+RAG_CHUNK_OVERLAP_CHARS = int(os.environ.get("RAG_CHUNK_OVERLAP_CHARS", "250"))
+RAG_MAX_CHUNKS_PER_DOCUMENT = int(os.environ.get("RAG_MAX_CHUNKS_PER_DOCUMENT", "500"))
+RAG_RETRIEVAL_TOP_K = int(os.environ.get("RAG_RETRIEVAL_TOP_K", "20"))
+RAG_CONTEXT_TOP_K = int(os.environ.get("RAG_CONTEXT_TOP_K", "6"))
+RAG_CONTEXT_MAX_CHARS = int(os.environ.get("RAG_CONTEXT_MAX_CHARS", "12000"))
+RAG_CONTEXT_CHUNK_MAX_CHARS = int(os.environ.get("RAG_CONTEXT_CHUNK_MAX_CHARS", "2200"))
+RAG_LANGFUSE_CAPTURE_CONTENT = env_bool("RAG_LANGFUSE_CAPTURE_CONTENT", "0")
+
+RAG_EMBEDDING_MODEL = os.environ.get("RAG_EMBEDDING_MODEL", "qwen3-vl-embedding-2b")
+RAG_EMBEDDING_BASE_URL = os.environ.get("RAG_EMBEDDING_BASE_URL", "http://127.0.0.1:8011/v1")
+RAG_EMBEDDING_API_KEY = os.environ.get("RAG_EMBEDDING_API_KEY", VLLM_API_KEY)
+RAG_EMBEDDING_DIM = int(os.environ.get("RAG_EMBEDDING_DIM", "2048"))
+RAG_EMBEDDING_BATCH_SIZE = int(os.environ.get("RAG_EMBEDDING_BATCH_SIZE", "16"))
+RAG_EMBEDDING_TIMEOUT_SECONDS = float(os.environ.get("RAG_EMBEDDING_TIMEOUT_SECONDS", "300"))
+RAG_EMBEDDING_REQUEST_DIMENSIONS = env_bool("RAG_EMBEDDING_REQUEST_DIMENSIONS", "0")
+RAG_NORMALIZE_EMBEDDINGS = env_bool("RAG_NORMALIZE_EMBEDDINGS", "1")
+
+RAG_RERANK_ENABLED = env_bool("RAG_RERANK_ENABLED", "1")
+RAG_RERANK_PROVIDER = os.environ.get("RAG_RERANK_PROVIDER", "vllm-rerank")
+RAG_RERANK_MODEL = os.environ.get("RAG_RERANK_MODEL", "qwen3-vl-reranker-2b")
+RAG_RERANK_BASE_URL = os.environ.get("RAG_RERANK_BASE_URL", "http://127.0.0.1:8012/v1")
+RAG_RERANK_API_KEY = os.environ.get("RAG_RERANK_API_KEY", VLLM_API_KEY)
+RAG_RERANK_TIMEOUT_SECONDS = float(os.environ.get("RAG_RERANK_TIMEOUT_SECONDS", "300"))
+RAG_RERANK_MAX_DOCUMENT_CHARS = int(os.environ.get("RAG_RERANK_MAX_DOCUMENT_CHARS", "1800"))
+
+RAG_VLLM_MODELS = {
+    RAG_EMBEDDING_MODEL: RAG_EMBEDDING_BASE_URL,
+    RAG_RERANK_MODEL: RAG_RERANK_BASE_URL,
+}
+RAG_MODEL_CONTAINERS = {}
+if env_bool("RAG_MANAGED_EMBEDDING_MODEL", "0" if IS_TEST_COMMAND else "1"):
+    RAG_MODEL_CONTAINERS[RAG_EMBEDDING_MODEL] = {
+        "service_name": os.environ.get("RAG_EMBEDDING_SERVICE_NAME", "vllm-qwen3-vl-embedding-2b"),
+        "container_name": os.environ.get("RAG_EMBEDDING_CONTAINER_NAME", "vllm-qwen3-vl-embedding-2b-dev"),
+    }
+if env_bool("RAG_MANAGED_RERANK_MODEL", "0" if IS_TEST_COMMAND else "1"):
+    RAG_MODEL_CONTAINERS[RAG_RERANK_MODEL] = {
+        "service_name": os.environ.get("RAG_RERANK_SERVICE_NAME", "vllm-qwen3-vl-reranker-2b"),
+        "container_name": os.environ.get("RAG_RERANK_CONTAINER_NAME", "vllm-qwen3-vl-reranker-2b-dev"),
+    }
+
 LANGFUSE_BASE_URL = os.environ.get("LANGFUSE_BASE_URL", "http://127.0.0.1:3001")
 LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "pk-lf-dev-project-key")
 LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "sk-lf-dev-secret-key")

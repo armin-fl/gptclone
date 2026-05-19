@@ -13,7 +13,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from requests import RequestException
 
 from accounts.models import User
-from api.models import Conversation, Message
+from api.models import Conversation, KnowledgeChunk, KnowledgeDocument, Message
 from .model_runtime import (
     ACTIVE_VLLM_MODEL_KEY,
     VllmRuntimeError,
@@ -23,14 +23,17 @@ from .model_runtime import (
     _inflight_count,
     _sleep_image_model,
     _switch_image_model,
+    _switch_rag_model,
     _switch_vllm_model,
     _wake_image_model,
     _wake_vllm_model,
     is_managed_vllm_model,
+    managed_rag_model,
     managed_image_model,
     managed_vllm_model,
     warmup_vllm_models,
 )
+from .rag import RagError, RagHit, build_rag_context_message, build_rag_prompt_context, chunk_text
 from .services import (
     UnsupportedLlmModelError,
     UnsupportedVllmModelError,
@@ -87,6 +90,62 @@ class VllmServiceTests(SimpleTestCase):
         )
         self.assertEqual(strip_thinking_blocks("<think>still thinking"), "")
 
+    @override_settings(RAG_CHUNK_CHARS=220, RAG_CHUNK_OVERLAP_CHARS=20, RAG_MAX_CHUNKS_PER_DOCUMENT=10)
+    def test_chunk_text_splits_with_overlap(self):
+        chunks = chunk_text(" ".join([f"token-{index}" for index in range(80)]))
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(chunks))
+        self.assertIn("token-0", chunks[0])
+
+    @override_settings(RAG_CONTEXT_MAX_CHARS=500, RAG_CONTEXT_CHUNK_MAX_CHARS=200)
+    def test_build_rag_context_message_formats_citations(self):
+        document = KnowledgeDocument(title="Project Notes", source_name="notes.md")
+        chunk = KnowledgeChunk(document=document, chunk_index=0, content="The launch date is Friday.")
+        message = build_rag_context_message([RagHit(chunk=chunk, score=0.92)])
+
+        self.assertIn("[RAG-1] notes.md", message)
+        self.assertIn("The launch date is Friday.", message)
+
+    @override_settings(RAG_ENABLED=True, RAG_FAIL_OPEN=True)
+    @patch("api.rag.retrieve_relevant_chunks")
+    def test_build_rag_prompt_context_fails_open(self, mock_retrieve_relevant_chunks):
+        mock_retrieve_relevant_chunks.side_effect = RagError("Milvus unavailable")
+
+        context, sources, error = build_rag_prompt_context(
+            user=SimpleNamespace(id=1),
+            query="question",
+        )
+
+        self.assertEqual(context, "")
+        self.assertEqual(sources, [])
+        self.assertIn("Milvus unavailable", error)
+
+    @override_settings(RAG_ENABLED=True)
+    @patch("api.rag.propagate_attributes")
+    @patch("api.rag.retrieve_relevant_chunks")
+    def test_build_rag_prompt_context_sets_langfuse_trace_attributes(
+        self,
+        mock_retrieve_relevant_chunks,
+        mock_propagate_attributes,
+    ):
+        mock_retrieve_relevant_chunks.return_value = []
+        mock_propagate_attributes.return_value = nullcontext()
+
+        build_rag_prompt_context(
+            user=SimpleNamespace(id=7),
+            query="Where is this in my docs?",
+            langfuse_session_id="conversation-1",
+            langfuse_user_id="user-7",
+            langfuse_metadata={"message_id": 10},
+        )
+
+        mock_propagate_attributes.assert_called_once()
+        self.assertEqual(mock_propagate_attributes.call_args.kwargs["trace_name"], "rag-chat-context")
+        self.assertEqual(mock_propagate_attributes.call_args.kwargs["session_id"], "conversation-1")
+        self.assertEqual(mock_propagate_attributes.call_args.kwargs["user_id"], "user-7")
+        self.assertEqual(mock_propagate_attributes.call_args.kwargs["metadata"]["message_id"], "10")
+
     def test_send_message_serializer_accepts_thinking_enabled(self):
         serializer = SendMessageSerializer(
             data={"content": "Hello", "thinking_enabled": True, "stream": True}
@@ -104,6 +163,14 @@ class VllmServiceTests(SimpleTestCase):
         self.assertTrue(serializer.is_valid(), serializer.errors)
         self.assertTrue(serializer.validated_data["thinking_enabled"])
         self.assertEqual(serializer.validated_data["thinking_effort"], "long")
+
+    def test_send_message_serializer_accepts_rag_enabled(self):
+        serializer = SendMessageSerializer(
+            data={"content": "Hello", "rag_enabled": True, "stream": True}
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertTrue(serializer.validated_data["rag_enabled"])
 
     @override_settings(
         VLLM_AUTO_SWITCH_ENABLED=True,
@@ -164,6 +231,62 @@ class VllmServiceTests(SimpleTestCase):
 
         self.assertEqual(_inflight_count("model-1"), 0)
         mock_switch_vllm_model.assert_called_once_with("model-1")
+
+    @override_settings(
+        VLLM_AUTO_SWITCH_ENABLED=True,
+        VLLM_SLEEP_MODE_ENABLED=True,
+        RAG_MODEL_CONTAINERS={
+            "embed-model": {
+                "service_name": "vllm-embed-model",
+                "container_name": "vllm-embed-model-dev",
+            },
+        },
+    )
+    @patch("api.model_runtime._wait_for_rag_model_ready")
+    @patch("api.model_runtime._container_running")
+    def test_managed_rag_model_tracks_inflight_without_sleep_switching(
+        self,
+        mock_container_running,
+        mock_wait_for_rag_model_ready,
+    ):
+        mock_container_running.return_value = True
+
+        with managed_rag_model("embed-model"):
+            self.assertEqual(_inflight_count("rag:embed-model"), 1)
+
+        self.assertEqual(_inflight_count("rag:embed-model"), 0)
+        mock_wait_for_rag_model_ready.assert_called_once_with("embed-model")
+
+    @override_settings(
+        RAG_MODEL_CONTAINERS={
+            "embed-model": {
+                "service_name": "vllm-embed-model",
+                "container_name": "vllm-embed-model-dev",
+            },
+        },
+        RAG_VLLM_MODELS={"embed-model": "http://127.0.0.1:8111/v1"},
+    )
+    @patch("api.model_runtime._sleep_image_model")
+    @patch("api.model_runtime._sleep_vllm_model")
+    @patch("api.model_runtime._wait_for_rag_model_ready")
+    @patch("api.model_runtime._start_container")
+    @patch("api.model_runtime._container_running")
+    def test_switch_rag_model_only_keeps_rag_container_ready(
+        self,
+        mock_container_running,
+        mock_start_container,
+        mock_wait_for_rag_model_ready,
+        mock_sleep_vllm_model,
+        mock_sleep_image_model,
+    ):
+        mock_container_running.return_value = True
+
+        _switch_rag_model("embed-model")
+
+        mock_start_container.assert_not_called()
+        mock_sleep_vllm_model.assert_not_called()
+        mock_sleep_image_model.assert_not_called()
+        mock_wait_for_rag_model_ready.assert_called_once_with("embed-model")
 
     @override_settings(
         VLLM_AUTO_SWITCH_ENABLED=True,
@@ -1077,6 +1200,62 @@ class ConversationAuthorizationTests(TestCase):
         self.assertEqual(response.data["models"][0]["id"], "gpt-oss-20b")
         self.assertFalse(response.data["models"][0]["available"])
 
+    @patch("api.views.index_knowledge_document")
+    def test_knowledge_document_create_and_list_are_user_scoped(self, mock_index_knowledge_document):
+        def create_document(*, user, content, title="", source_name="", **_kwargs):
+            return KnowledgeDocument.objects.create(
+                user=user,
+                title=title or "Doc",
+                source_name=source_name,
+                content_hash="a" * 64,
+                chunk_count=1,
+            )
+
+        mock_index_knowledge_document.side_effect = create_document
+        self.authenticate(self.user)
+
+        create_response = self.client.post(
+            "/api/knowledge/documents/",
+            {"title": "Handbook", "source_name": "handbook.md", "content": "Policy text"},
+            format="json",
+        )
+        list_response = self.client.get("/api/knowledge/documents/")
+
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(create_response.data["title"], "Handbook")
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(len(list_response.data["documents"]), 1)
+
+        self.authenticate(self.other_user)
+        other_list_response = self.client.get("/api/knowledge/documents/")
+        self.assertEqual(other_list_response.data["documents"], [])
+
+    @patch("api.views.retrieve_relevant_chunks")
+    def test_knowledge_search_returns_serialized_hits(self, mock_retrieve_relevant_chunks):
+        self.authenticate(self.user)
+        document = KnowledgeDocument.objects.create(
+            user=self.user,
+            title="Notes",
+            content_hash="b" * 64,
+            chunk_count=1,
+        )
+        chunk = KnowledgeChunk.objects.create(
+            document=document,
+            chunk_index=0,
+            content="Important answer",
+        )
+        mock_retrieve_relevant_chunks.return_value = [RagHit(chunk=chunk, score=0.8, rerank_score=0.9)]
+
+        response = self.client.post(
+            "/api/knowledge/search/",
+            {"query": "answer"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["results"][0]["document_title"], "Notes")
+        self.assertEqual(response.data["results"][0]["content"], "Important answer")
+
     def test_conversations_are_scoped_to_authenticated_user(self):
         self.authenticate(self.user)
         create_response = self.client.post("/api/conversations/", {}, format="json")
@@ -1261,6 +1440,40 @@ class ConversationAuthorizationTests(TestCase):
                 content="Hello stream",
             ).exists()
         )
+
+    @override_settings(RAG_ENABLED=True)
+    @patch("api.views.build_rag_prompt_context")
+    @patch("api.views.stream_llm_chat")
+    def test_streaming_message_injects_rag_context(
+        self,
+        mock_stream_llm_chat,
+        mock_build_rag_prompt_context,
+    ):
+        self.authenticate(self.user)
+        conversation = Conversation.objects.create(user=self.user)
+        mock_stream_llm_chat.return_value = ["Answer"]
+        mock_build_rag_prompt_context.return_value = (
+            "Retrieved knowledge\n\n[RAG-1] notes\nA grounded fact.",
+            [{"rank": 1}],
+            "",
+        )
+
+        response = self.client.post(
+            f"/api/conversations/{conversation.id}/messages/",
+            {"content": "Use my docs", "stream": True, "rag_enabled": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        b"".join(response.streaming_content)
+        call_kwargs = mock_stream_llm_chat.call_args.kwargs
+        self.assertIn("[RAG-1] notes", call_kwargs["messages"][0]["content"])
+        self.assertEqual(call_kwargs["langfuse_metadata"]["rag_hit_count"], 1)
+        self.assertTrue(call_kwargs["langfuse_metadata"]["rag_enabled"])
+        rag_call_kwargs = mock_build_rag_prompt_context.call_args.kwargs
+        self.assertEqual(rag_call_kwargs["langfuse_session_id"], str(conversation.id))
+        self.assertEqual(rag_call_kwargs["langfuse_user_id"], str(self.user.id))
+        self.assertEqual(rag_call_kwargs["langfuse_metadata"]["chat_action"], "send")
 
     @patch("api.views.time.monotonic")
     @patch("api.views.stream_llm_chat")

@@ -14,6 +14,10 @@ This backend is set up for **development only**.
   - `POST /api/conversations/`
   - `GET /api/conversations/<conversation_id>/`
   - `POST /api/conversations/<conversation_id>/messages/`
+  - `GET /api/knowledge/documents/`
+  - `POST /api/knowledge/documents/`
+  - `DELETE /api/knowledge/documents/<document_id>/`
+  - `POST /api/knowledge/search/`
 - LLM gateway integration:
   - `gpt-oss-20b` -> `POST http://127.0.0.1:8001/v1/chat/completions`
   - `qwen3-32b-awq` -> `POST http://127.0.0.1:8002/v1/chat/completions`
@@ -24,6 +28,7 @@ This backend is set up for **development only**.
   - Langfuse UI -> `http://127.0.0.1:3001`
   - Default dev project keys are initialized by Docker Compose.
 - Full conversation history is sent to the selected LLM as a **system message** before the latest user message.
+- Optional RAG uses Milvus for vector search, Qwen3-VL Embedding 2B at `http://127.0.0.1:8011/v1`, and Qwen3-VL Reranker 2B at `http://127.0.0.1:8012/v1`.
 - Phone + OTP authentication with SimpleJWT symmetric HS256 access/refresh tokens:
   - `POST /api/auth/request-otp/`
   - `POST /api/auth/verify-otp/`
@@ -84,6 +89,16 @@ LLM_MODELS = {
     "deepseek-r1-distill-qwen-32b-awq": {"provider": "vllm", "base_url": "http://127.0.0.1:8004/v1", "max_context_tokens": 32768},
     "qwen3:14b": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1", "max_context_tokens": 32768},
 }
+RAG_ENABLED = True
+RAG_MILVUS_URI = "http://127.0.0.1:19530"
+RAG_MILVUS_COLLECTION = "gptclone_knowledge_chunks_qwen3_vl_2b"
+RAG_EMBEDDING_MODEL = "qwen3-vl-embedding-2b"
+RAG_EMBEDDING_BASE_URL = "http://127.0.0.1:8011/v1"
+RAG_EMBEDDING_DIM = 2048
+RAG_RERANK_PROVIDER = "vllm-rerank"
+RAG_RERANK_MODEL = "qwen3-vl-reranker-2b"
+RAG_RERANK_BASE_URL = "http://127.0.0.1:8012/v1"
+RAG_LANGFUSE_CAPTURE_CONTENT = False
 LANGFUSE_BASE_URL = "http://127.0.0.1:3001"
 LANGFUSE_PUBLIC_KEY = "pk-lf-dev-project-key"
 LANGFUSE_SECRET_KEY = "sk-lf-dev-secret-key"
@@ -104,11 +119,42 @@ because the request finished. A request for a different vLLM model waits for
 current in-flight requests to finish, sleeps the active server at level `1`, and
 wakes the requested one.
 
+RAG embedding and reranker containers are the exception: Django only ensures
+they are running and ready. It does not send sleep or wake calls to RAG models,
+and text/image model switches do not sleep them.
+
 To pre-create and warm all managed vLLM containers from the backend, run:
 
 ```bash
 python manage.py warmup_vllm_models
 ```
+
+### RAG
+
+Milvus runs from the dev Docker Compose stack on `127.0.0.1:19530`. Add a text
+document to the authenticated user's knowledge base:
+
+```bash
+POST /api/knowledge/documents/
+{"title": "Handbook", "source_name": "handbook.md", "content": "..."}
+```
+
+Chat requests use RAG by default when `RAG_ENABLED=1`; pass
+`"rag_enabled": false` on send, regenerate, or edit requests to skip retrieval
+for a single turn. Search can be tested directly with:
+
+```bash
+POST /api/knowledge/search/
+{"query": "What does the handbook say?", "top_k": 10}
+```
+
+RAG writes Langfuse traces for indexing, direct search, and chat-context
+retrieval. The traces include nested observations for embedding, Milvus
+collection/load, vector insert/delete/search, reranking, and final prompt
+context assembly. By default, RAG-specific observations store document/query
+hashes, ids, counts, scores, and character lengths rather than raw document
+content. Set `RAG_LANGFUSE_CAPTURE_CONTENT=1` if you want those RAG spans to
+also capture raw queries and document snippets.
 
 ### Migrations and superuser
 

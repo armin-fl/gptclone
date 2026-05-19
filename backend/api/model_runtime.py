@@ -13,6 +13,7 @@ from requests import RequestException
 
 GPU_SLOT_LOCK_KEY = "llm:vllm-gpu-slot-lock"
 ACTIVE_VLLM_MODEL_KEY = "llm:active-vllm-model"
+ACTIVE_RAG_MODEL_KEY = "rag:active-vllm-model"
 VLLM_INFLIGHT_KEY_PREFIX = "llm:vllm-inflight:"
 IMAGE_SLEEPING_KEY_PREFIX = "image:omni-sleeping:"
 
@@ -82,6 +83,11 @@ def get_image_container_config(model: str) -> VllmContainerConfig | None:
     return _parse_container_config("IMAGE_MODEL_CONTAINERS", model, raw_config)
 
 
+def get_rag_container_config(model: str) -> VllmContainerConfig | None:
+    raw_config = getattr(settings, "RAG_MODEL_CONTAINERS", {}).get(model)
+    return _parse_container_config("RAG_MODEL_CONTAINERS", model, raw_config)
+
+
 def _parse_container_config(
     setting_name: str,
     model: str,
@@ -116,12 +122,20 @@ def is_managed_image_model(model: str) -> bool:
     return get_image_container_config(model) is not None
 
 
+def is_managed_rag_model(model: str) -> bool:
+    return get_rag_container_config(model) is not None
+
+
 def _managed_vllm_models() -> list[str]:
     return list(getattr(settings, "VLLM_MODEL_CONTAINERS", {}).keys())
 
 
 def _managed_image_models() -> list[str]:
     return list(getattr(settings, "IMAGE_MODEL_CONTAINERS", {}).keys())
+
+
+def _managed_rag_models() -> list[str]:
+    return list(getattr(settings, "RAG_MODEL_CONTAINERS", {}).keys())
 
 
 def _managed_inflight_models() -> list[str]:
@@ -383,6 +397,13 @@ def _image_model_base_url(model: str) -> str:
         raise VllmRuntimeError(f"Unsupported managed image model '{model}'.") from exc
 
 
+def _rag_model_base_url(model: str) -> str:
+    try:
+        return str(settings.RAG_VLLM_MODELS[model]).rstrip("/")
+    except KeyError as exc:
+        raise VllmRuntimeError(f"Unsupported managed RAG model '{model}'.") from exc
+
+
 def _wait_for_image_model_ready(model: str) -> None:
     base_url = _image_model_base_url(model)
     headers = {"Authorization": f"Bearer {settings.IMAGE_API_KEY}"} if settings.IMAGE_API_KEY else {}
@@ -410,6 +431,36 @@ def _wait_for_image_model_ready(model: str) -> None:
     detail = f" Last error: {last_error}" if last_error else ""
     raise VllmRuntimeError(
         f"Timed out waiting for image model '{model}' to become ready at {base_url}.{detail}"
+    )
+
+
+def _wait_for_rag_model_ready(model: str) -> None:
+    base_url = _rag_model_base_url(model)
+    headers = {"Authorization": f"Bearer {settings.VLLM_API_KEY}"} if settings.VLLM_API_KEY else {}
+    timeout = float(getattr(settings, "VLLM_MODEL_START_TIMEOUT_SECONDS", 900))
+    deadline = time.monotonic() + timeout
+    last_error = ""
+
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(
+                f"{base_url}/models",
+                headers=headers,
+                timeout=settings.LLM_MODEL_HEALTH_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if _model_is_listed(model, payload):
+                return
+            last_error = "server is running, but the requested served model is not listed"
+        except (RequestException, ValueError) as exc:
+            last_error = str(exc)
+
+        time.sleep(float(getattr(settings, "VLLM_RUNTIME_POLL_SECONDS", 1.0)))
+
+    detail = f" Last error: {last_error}" if last_error else ""
+    raise VllmRuntimeError(
+        f"Timed out waiting for RAG model '{model}' to become ready at {base_url}.{detail}"
     )
 
 
@@ -838,6 +889,23 @@ def _switch_image_model(model: str) -> None:
     _clear_image_model_status_cache()
 
 
+def _switch_rag_model(model: str) -> None:
+    requested_config = get_rag_container_config(model)
+    if requested_config is None:
+        return
+
+    if not _container_running(requested_config.container_name):
+        _start_container(requested_config)
+
+    if not _container_running(requested_config.container_name):
+        raise VllmRuntimeError(
+            f"RAG model container '{requested_config.container_name}' did not start."
+        )
+
+    _wait_for_rag_model_ready(model)
+    cache.set(ACTIVE_RAG_MODEL_KEY, model, timeout=None)
+
+
 def _register_vllm_inference(model: str) -> None:
     with _CacheLock(
         GPU_SLOT_LOCK_KEY,
@@ -862,6 +930,26 @@ def _register_vllm_inference(model: str) -> None:
         _increment_inflight(model)
 
 
+def _register_rag_inference(model: str) -> None:
+    with _CacheLock(
+        GPU_SLOT_LOCK_KEY,
+        wait_timeout=float(getattr(settings, "VLLM_GPU_LOCK_WAIT_TIMEOUT_SECONDS", 900)),
+        ttl=int(getattr(settings, "VLLM_GPU_LOCK_TTL_SECONDS", 7200)),
+        poll_seconds=float(getattr(settings, "VLLM_RUNTIME_POLL_SECONDS", 1.0)),
+    ):
+        requested_config = get_rag_container_config(model)
+        if requested_config is None:
+            return
+
+        is_running = _container_running(requested_config.container_name)
+        if not is_running:
+            _switch_rag_model(model)
+        else:
+            _wait_for_rag_model_ready(model)
+
+        _increment_inflight(f"rag:{model}")
+
+
 @contextmanager
 def managed_vllm_model(model: str):
     if not vllm_auto_switch_enabled() or not is_managed_vllm_model(model):
@@ -873,6 +961,20 @@ def managed_vllm_model(model: str):
         yield
     finally:
         _decrement_inflight(model)
+
+
+@contextmanager
+def managed_rag_model(model: str):
+    if not vllm_auto_switch_enabled() or not is_managed_rag_model(model):
+        yield
+        return
+
+    inflight_model = f"rag:{model}"
+    _register_rag_inference(model)
+    try:
+        yield
+    finally:
+        _decrement_inflight(inflight_model)
 
 
 @contextmanager
