@@ -78,6 +78,12 @@ Langfuse:
 - Dev public key: `pk-lf-dev-project-key`
 - Dev secret key: `sk-lf-dev-secret-key`
 
+RedisInsight:
+
+- UI: `http://127.0.0.1:5540`
+- App Redis connection from inside Docker: host `app-redis`, port `6379`
+- RedisInsight stores saved connections in the `redisinsight_data` Docker volume.
+
 Nginx dev proxy:
 
 - App: `http://127.0.0.1` or `http://46.100.12.235`

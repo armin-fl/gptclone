@@ -127,6 +127,8 @@ services:
       - app-redis
     ports:
       - "5540:5540"
+    volumes:
+      - redisinsight_data:/data
     restart: always
 
   milvus-etcd:
@@ -307,6 +309,7 @@ services:
 
 volumes:
   app_redis_data:
+  redisinsight_data:
   milvus_etcd_data:
   milvus_minio_data:
   milvus_data:
